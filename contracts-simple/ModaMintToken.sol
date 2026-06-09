@@ -712,10 +712,10 @@ contract ModaMintToken is IERC20, Ownable {
         require(totalBNBCollected + msg.value <= fillAmountBNB, "Presale full");
         totalBNBCollected = SafeMath.add(totalBNBCollected, msg.value);
         uint256 tokenAmt = tokensPerMint;
-        uint256 totalNeeded = SafeMath.add(tokenAmt, tokensPerLP);
-        require(_balances[address(this)] >= totalNeeded, "Insufficient contract balance");
+        require(_balances[address(this)] >= SafeMath.add(tokenAmt, tokensPerLP), "Insufficient contract balance");
         _balances[msg.sender] = SafeMath.add(_balances[msg.sender], tokenAmt);
-        _balances[address(this)] = SafeMath.sub(_balances[address(this)], totalNeeded);
+        // tokensPerLP 不在这里扣除，留给 _addMintLiquidity 使用
+        _balances[address(this)] = SafeMath.sub(_balances[address(this)], tokenAmt);
         mintedAmount[msg.sender] = SafeMath.add(mintedAmount[msg.sender], tokenAmt);
         emit Mint(msg.sender, msg.value, tokenAmt);
         emit Transfer(address(this), msg.sender, tokenAmt);
