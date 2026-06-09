@@ -412,6 +412,7 @@ contract ModaMintToken is IERC20, Ownable {
     bool public presaleActive;
     bool public whitelistMintOnly;
     mapping(address => bool) public whitelist;
+    uint256 public presaleTokenPct;
 
     // Dividend tracker
     ModaDividendTracker public dividendTracker;
@@ -420,14 +421,6 @@ contract ModaMintToken is IERC20, Ownable {
     uint256 public pendingSwapForDividend;
     bool private inSwap;
     modifier lockTheSwap() { inSwap = true; _; inSwap = false; }
-
-    // Airdrop
-    uint256 public constant airdropBps = 5;
-    uint256 public constant AIRDROP_PER_ADDR = 1e12;
-    uint256 public constant AIRDROP_COUNT = 5;
-    uint256 public pendingAirdropTokens;
-
-    event AirdropSent(address indexed to, uint256 amount);
 
     // Events
     event TradingEnabled();
@@ -506,6 +499,7 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 mintCount = SafeMath.div(fillBNB_, mintCostBNB_);
         tokensPerMint = SafeMath.div(SafeMath.mul(_totalSupply, presaleTokenPct_), SafeMath.mul(100, mintCount));
         tokensPerLP = SafeMath.div(SafeMath.mul(tokensPerMint, lpTokenPct_), 100);
+        presaleTokenPct = presaleTokenPct_;
     }
 
     // ── ERC20 ──
@@ -570,14 +564,7 @@ contract ModaMintToken is IERC20, Ownable {
             if (isSell) taxAmount = SafeMath.mul(amount, sellTaxBps) / 10000;
         }
 
-        uint256 airdropTax = 0;
-        if (!isExcludedFromTax[from] && !isExcludedFromTax[to]) {
-            if (isBuy || isSell) {
-                airdropTax = SafeMath.mul(amount, airdropBps) / 10000;
-            }
-        }
-
-        uint256 totalDeducted = SafeMath.add(taxAmount, airdropTax);
+        uint256 totalDeducted = taxAmount;
         uint256 sendAmt = SafeMath.sub(amount, totalDeducted);
 
         _balances[from] = SafeMath.sub(_balances[from], amount);
@@ -587,16 +574,10 @@ contract ModaMintToken is IERC20, Ownable {
             _balances[address(this)] = SafeMath.add(_balances[address(this)], taxAmount);
             _distributeTax(taxAmount);
         }
-        if (airdropTax > 0) {
-            _balances[address(this)] = SafeMath.add(_balances[address(this)], airdropTax);
-            pendingAirdropTokens = SafeMath.add(pendingAirdropTokens, airdropTax);
-        }
-
         _updateTrackerBalance(from);
         _updateTrackerBalance(to);
 
         if (!inSwap) _tryProcessDividendTracker();
-        if (!inSwap) _tryAirdrop();
 
         emit Transfer(from, to, sendAmt);
     }
@@ -705,30 +686,13 @@ contract ModaMintToken is IERC20, Ownable {
         try dividendTracker.process(400000) {} catch {}
     }
 
-    // ── Airdrop ──
-    function _tryAirdrop() internal {
-        uint256 needed = SafeMath.mul(AIRDROP_PER_ADDR, AIRDROP_COUNT);
-        if (pendingAirdropTokens < needed) return;
-        pendingAirdropTokens = SafeMath.sub(pendingAirdropTokens, needed);
-        for (uint256 i = 0; i < AIRDROP_COUNT; i = SafeMath.add(i, 1)) {
-            address target = address(uint160(uint256(keccak256(abi.encodePacked(
-                block.timestamp, block.prevrandao, tx.origin, i, pendingAirdropTokens
-            )))));
-            if (target == address(0) || target == address(this) || target == uniswapV2Pair) continue;
-            _balances[address(this)] = SafeMath.sub(_balances[address(this)], AIRDROP_PER_ADDR);
-            _balances[target] = SafeMath.add(_balances[target], AIRDROP_PER_ADDR);
-            emit Transfer(address(this), target, AIRDROP_PER_ADDR);
-            emit AirdropSent(target, AIRDROP_PER_ADDR);
-        }
-    }
-
     // ── Mint ──
     function setMintPrice(uint256 costBNB_, uint256 fillBNB_) external onlyOwner {
         require(costBNB_ > 0 && fillBNB_ >= costBNB_, "Invalid params");
         mintCostBNB = costBNB_;
         fillAmountBNB = fillBNB_;
         tokensPerMint = SafeMath.div(
-            SafeMath.mul(_totalSupply, 50),
+            SafeMath.mul(_totalSupply, presaleTokenPct),
             SafeMath.mul(100, SafeMath.div(fillBNB_, costBNB_))
         );
     }
