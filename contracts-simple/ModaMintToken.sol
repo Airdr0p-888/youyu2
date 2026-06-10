@@ -234,6 +234,7 @@ contract ModaDividendTracker is DividendPayingToken {
     mapping(address => uint256) public lastClaimTimes;
     uint256 public claimWait = 300;
     uint256 public minimumTokenBalanceForDividends;
+    uint256 private totalTrackedSupply;   // 参与分红的总余额
 
     event ExcludedFromDividends(address indexed account, bool excluded);
     event ClaimWaitUpdated(uint256 newClaimWait);
@@ -247,7 +248,7 @@ contract ModaDividendTracker is DividendPayingToken {
         require(false, "DividendTracker: no transfer");
     }
 
-    function totalSupply() public view override returns (uint256) { return 0; }
+    function totalSupply() public view override returns (uint256) { return totalTrackedSupply; }
 
     function balanceOf(address account) public view override returns (uint256) {
         return tokenHoldersMap.values[account];
@@ -268,19 +269,29 @@ contract ModaDividendTracker is DividendPayingToken {
     }
 
     function _set(address account, uint256 newBalance) internal {
+        int256 oldCorrection = magnifiedDividendCorrections[account];
+        uint256 oldBalance = tokenHoldersMap.inserted[account] ? tokenHoldersMap.values[account] : 0;
+
         if (tokenHoldersMap.inserted[account]) {
+            totalTrackedSupply = SafeMath.sub(totalTrackedSupply, tokenHoldersMap.values[account]);
             tokenHoldersMap.values[account] = newBalance;
+            totalTrackedSupply = SafeMath.add(totalTrackedSupply, newBalance);
         } else {
             tokenHoldersMap.set(account, newBalance);
+            totalTrackedSupply = SafeMath.add(totalTrackedSupply, newBalance);
         }
-        magnifiedDividendCorrections[account] = -int256(
-            SafeMath.mul(magnifiedDividendPerShare, newBalance) / MAGNITUDE
-        );
+
+        // 修正：保留历史 correction，而非直接覆盖
+        magnifiedDividendCorrections[account] =
+            oldCorrection
+            + int256(SafeMath.mul(magnifiedDividendPerShare, oldBalance) / MAGNITUDE)
+            - int256(SafeMath.mul(magnifiedDividendPerShare, newBalance) / MAGNITUDE);
     }
 
     function _remove(address account) internal {
         if (!tokenHoldersMap.inserted[account]) return;
         _withdrawDividendOfUser(payable(account));
+        totalTrackedSupply = SafeMath.sub(totalTrackedSupply, tokenHoldersMap.values[account]);
         tokenHoldersMap.remove(account);
         delete magnifiedDividendCorrections[account];
         delete withdrawnDividends[account];
@@ -334,19 +345,21 @@ contract ModaDividendTracker is DividendPayingToken {
 
     function claim() external {
         require(SafeMath.add(lastClaimTimes[msg.sender], claimWait) <= block.timestamp, "Claim wait not met");
+        uint256 amount = withdrawableDividendOf(msg.sender);
         _withdrawDividendOfUser(payable(msg.sender));
         lastClaimTimes[msg.sender] = block.timestamp;
-        emit Claim(msg.sender, withdrawableDividendOf(msg.sender), false);
+        emit Claim(msg.sender, amount, false);
     }
 
     function processAccount(address payable account, bool autoClaim) public onlyOwner returns (bool) {
         if (!autoClaim) {
             require(SafeMath.add(lastClaimTimes[account], claimWait) <= block.timestamp, "Claim wait not met");
         }
+        uint256 amount = withdrawableDividendOf(account);
         bool claimed = _withdrawDividendOfUser(account);
         if (claimed) {
             lastClaimTimes[account] = block.timestamp;
-            emit Claim(account, withdrawableDividendOf(account), autoClaim);
+            emit Claim(account, amount, autoClaim);
         }
         return claimed;
     }
@@ -421,8 +434,8 @@ contract ModaMintToken is IERC20, Ownable {
 
     // Dividend tracker
     ModaDividendTracker public dividendTracker;
-    uint256 public dividendSwapThreshold = 10 * 1e18;
     uint256 public pendingLiquidityTokens;
+    uint256 public pendingLiquidityBNB;
     uint256 public pendingSwapForDividend;
     bool public autoSwapEnabled = true;
     bool private inSwap;
@@ -647,18 +660,21 @@ contract ModaMintToken is IERC20, Ownable {
     function _processSwap() internal lockTheSwap {
         uint256 divAmt = pendingSwapForDividend;
         uint256 mktAmt = pendingMarketingTokens;
-        uint256 swapAmt = divAmt + mktAmt;
+        uint256 liqAmt = pendingLiquidityTokens;
+        uint256 liqSwapAmt = liqAmt / 2;                // swap 一半 LP 代币换成 BNB，用做 LP 配对
+        uint256 swapAmt = divAmt + mktAmt + liqSwapAmt;
         if (swapAmt == 0) return;
 
         pendingSwapForDividend = 0;
         pendingMarketingTokens = 0;
+        pendingLiquidityTokens = liqAmt - liqSwapAmt;   // 另一半留给 LP 配对
 
         uint256 bnbBefore = address(this).balance;
 
         _approve(address(this), address(uniswapV2Router), swapAmt);
 
         try uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            swapAmt, 0, _getPath(), address(this), block.timestamp
+            swapAmt, 1, _getPath(), address(this), block.timestamp
         ) {
             uint256 bnbReceived = address(this).balance - bnbBefore;
 
@@ -678,13 +694,17 @@ contract ModaMintToken is IERC20, Ownable {
                 }
             }
 
-            // Liquidity 单独处理，不混在 swap 里
-            if (pendingLiquidityTokens > 0) {
-                _tryAddLiquidity();
+            // LP BNB 单独追踪，不混入分红/营销
+            if (liqSwapAmt > 0 && bnbReceived > 0) {
+                uint256 liqBNB = (bnbReceived * liqSwapAmt) / swapAmt;
+                pendingLiquidityBNB = SafeMath.add(pendingLiquidityBNB, liqBNB);
             }
+
+            _tryAddLiquidity();
         } catch {
             pendingSwapForDividend = divAmt;
             pendingMarketingTokens = mktAmt;
+            pendingLiquidityTokens = liqAmt;            // 恢复原始 LP 代币
             emit DividendSwapFailed(swapAmt);
         }
     }
@@ -692,25 +712,27 @@ contract ModaMintToken is IERC20, Ownable {
     // 单独添加流动性：用合约里剩余的 BNB + 累积的 LP 代币加底池
     function _tryAddLiquidity() internal {
         uint256 tokenAmt = pendingLiquidityTokens;
-        uint256 bnbAmt = address(this).balance;
-        // 至少 0.01 BNB 才加，避免 dust LP 和意外耗尽合约 BNB
+        uint256 bnbAmt = pendingLiquidityBNB;
         if (tokenAmt == 0 || bnbAmt < 0.01 ether) return;
+
+        pendingLiquidityTokens = 0;
+        pendingLiquidityBNB = 0;
 
         _approve(address(this), address(uniswapV2Router), tokenAmt);
 
         try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
-            address(this), tokenAmt, 0, 0, owner(), block.timestamp
+            address(this), tokenAmt, 0, 0, address(this), block.timestamp
         ) {
-            pendingLiquidityTokens = 0;
             emit InitialLiquidityAdded(tokenAmt, bnbAmt);
         } catch {
-            // 失败不清零，下次再试
+            pendingLiquidityTokens = tokenAmt;
+            pendingLiquidityBNB = bnbAmt;
         }
     }
 
 
     function _tryProcessDividendTracker() internal {
-        try dividendTracker.process(400000) {} catch {}
+        try dividendTracker.process(100000) {} catch {}
     }
 
     // ── Mint ──
@@ -772,7 +794,7 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 tokenForLP = tokensPerLP;
         _approve(address(this), address(uniswapV2Router), tokenForLP);
         (uint256 tokenUsed, uint256 bnbUsed, ) = uniswapV2Router.addLiquidityETH{value: bnbAmount}(
-            address(this), tokenForLP, 0, 0, owner(), block.timestamp
+            address(this), tokenForLP, 0, 0, address(this), block.timestamp
         );
         emit InitialLiquidityAdded(tokenUsed, bnbUsed);
     }
@@ -800,9 +822,13 @@ contract ModaMintToken is IERC20, Ownable {
         liquidityBps = bps;
     }
 
-    function setDividendSwapThreshold(uint256 amt) external onlyOwner { dividendSwapThreshold = amt; }
     function setMinSwapAmount(uint256 amt) external onlyOwner { minSwapAmount = amt; }
     function setAutoSwapEnabled(bool enabled) external onlyOwner { autoSwapEnabled = enabled; }
+    // Owner 存入 BNB 用于 LP 加池，自动触发加池
+    function addLiquidityBNB() external payable onlyOwner {
+        pendingLiquidityBNB = SafeMath.add(pendingLiquidityBNB, msg.value);
+        _tryAddLiquidity();
+    }
     function setMinHoldForDividend(uint256 amt) external onlyOwner {
         dividendTracker.setMinimumTokenBalanceForDividends(amt);
     }
@@ -819,7 +845,7 @@ contract ModaMintToken is IERC20, Ownable {
         require(tokenAmt > 0 && bnbAmt > 0, "Nothing to add");
         _approve(address(this), address(uniswapV2Router), tokenAmt);
         try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
-            address(this), tokenAmt, 0, 0, owner(), block.timestamp
+            address(this), tokenAmt, 0, 0, address(this), block.timestamp
         ) {
             pendingLiquidityTokens = 0;  // 成功后清零，而不是调用前清零
         } catch {
@@ -868,7 +894,7 @@ contract ModaMintToken is IERC20, Ownable {
         dividendTracker = newTracker;
     }
 
-    function triggerDividendProcess(uint256 gas) external {
+    function triggerDividendProcess(uint256 gas) external onlyOwner {
         dividendTracker.process(gas);
     }
 
