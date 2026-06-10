@@ -267,7 +267,8 @@
     <div class="card-title">🎁 分红设置</div>
     <div class="hint" style="margin-bottom:14px">
       ✓ 分红合约由代币合约<b>自动部署</b>，无需额外操作<br/>
-      ✓ 交易税费中的「分红」部分会自动 swap 成 BNB 并发送到分红合约<br/>
+      ✓ 卖出时税费代币自动 swap 成 BNB → 发送到税费分配合约<br/>
+      ✓ 分配合约 <b>receive() 自动按比例分配</b> BNB 到营销钱包和分红合约<br/>
       ✓ 持币用户可领取自己的分红份额
     </div>
     <div class="field">
@@ -675,11 +676,13 @@ async function deployToken() {
     var taxDistAddr = distContract.address;
 
     // ═══════════════════════════════════════════
-    //  第三步：关联两个合约
+    //  第三步：设置税费分配钱包
+    //  主合约在卖出时自动 swap 税费 → BNB，
+    //  BNB 直达 TaxDistributor（由 receive() 自动按比例分配）。
     // ═══════════════════════════════════════════
-    setModalStatus('🔗 正在关联合约...', '请在钱包中确认第三笔交易', '🔗');
-    var setTx = await tokenContract.setTaxDistributor(taxDistAddr);
-    setModalStatus('⏳ 等待关联确认...', '区块确认中', '⏳');
+    setModalStatus('🔗 正在设置税费分配钱包...', '请在钱包中确认第三笔交易', '🔗');
+    var setTx = await tokenContract.setTaxDistributorWallet(taxDistAddr);
+    setModalStatus('⏳ 等待确认...', '区块确认中', '⏳');
     await setTx.wait(1);
 
     // ── Success ──
