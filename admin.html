@@ -114,6 +114,35 @@
     <div id="withdrawStatus" class="status"></div>
 
     <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px;">
+      <label style="font-weight:600;">🏊 LP 管理（LP 存在合约内）</label>
+      <div class="field" style="margin-top:8px;">
+        <label>合约 LP 余额</label>
+        <input type="text" id="lpBalance" readonly placeholder="先加载合约" style="font-family:var(--monospace);" />
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button id="btnWithdrawLP" class="btn btn-outline" onclick="withdrawLP()">📤 提取 LP 到钱包</button>
+        <button id="btnRemoveLiq" class="btn btn-outline" onclick="removeLiquidity()" style="border-color:var(--danger);color:var(--danger);">🔥 撤除底池</button>
+      </div>
+      <div class="hint" style="font-size:.72rem;color:var(--muted);margin-top:8px;">提取 LP：仅转移 LP 代币，底池不变 | 撤除底池：销毁 LP，取回代币+BNB</div>
+      <div id="lpStatus" class="status"></div>
+
+      <div style="margin-top:12px; padding-top:12px; border-top:1px dashed var(--border);">
+        <label style="font-weight:600;font-size:.88rem;">🪙 提取任意 ERC20 代币（意外转入等）</label>
+        <div class="field" style="margin-top:6px;">
+          <label>代币地址</label>
+          <input type="text" id="rescueTokenAddr" placeholder="0x..." style="font-family:var(--monospace);" />
+        </div>
+        <div class="field">
+          <label>数量（0 = 全部）</label>
+          <input type="text" id="rescueTokenAmt" placeholder="留空=全部" />
+        </div>
+        <button id="btnRescueToken" class="btn btn-outline" onclick="rescueToken()">🚑 提取该代币</button>
+        <div class="hint" style="font-size:.72rem;color:var(--muted);margin-top:6px;">可提取任何意外转入合约的 ERC20 代币。填 0 或留空则自动提取全部余额。</div>
+        <div id="rescueStatus" class="status"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px;">
       <button id="btnRenounce" class="btn btn-outline" onclick="renounceOwnership()" style="border-color:var(--danger);color:var(--danger);">☠️ 丢弃 Owner 权限（不可逆）</button>
       <div style="font-size:.72rem;color:var(--danger);margin-top:6px;">⚠️ 执行后 owner 永久归零，所有 onlyOwner 函数（白名单/税率等）将永久锁定！platformOwner 仍可操作 enableTrading / 提币</div>
       <div id="renounceStatus" class="status"></div>
@@ -280,6 +309,7 @@
     } catch(e) {
       document.getElementById('contractBalance').value = '获取失败';
     }
+    refreshLPBalance();
   }
 
   async function withdrawBNB() {
@@ -302,6 +332,112 @@
       s2.className = 'status err';
       s2.textContent = '❌ 失败：' + e.message;
     } finally { document.getElementById('btnWithdraw').disabled = false; }
+  }
+
+  async function refreshLPBalance() {
+    if (!contract) { document.getElementById('lpBalance').value = '请先加载合约'; return; }
+    try {
+      var pairAddr = await contract.uniswapV2Pair();
+      if (pairAddr === '0x0000000000000000000000000000000000000000') {
+        document.getElementById('lpBalance').value = '底池未创建';
+        return;
+      }
+      var factoryAbi = ['function getPair(address,address) view returns (address)'];
+      var pairAbi = ['function balanceOf(address) view returns (uint256)'];
+      var provider = new ethers.providers.Web3Provider(window.ethereum);
+      var pair = new ethers.Contract(pairAddr, pairAbi, provider);
+      var bal = await pair.balanceOf(contract.address);
+      var lpStr = ethers.utils.formatEther(bal);
+      document.getElementById('lpBalance').value = lpStr + ' LP';
+    } catch(e) {
+      document.getElementById('lpBalance').value = '获取失败';
+    }
+  }
+
+  async function withdrawLP() {
+    if (!contract) { alert('请先加载合约！'); return; }
+    try {
+      var pairAddr = await contract.uniswapV2Pair();
+      if (pairAddr === '0x0000000000000000000000000000000000000000') { alert('底池未创建！'); return; }
+      var pairAbi = ['function balanceOf(address) view returns (uint256)'];
+      var provider = new ethers.providers.Web3Provider(window.ethereum);
+      var pair = new ethers.Contract(pairAddr, pairAbi, provider);
+      var bal = await pair.balanceOf(contract.address);
+      if (bal.isZero()) { alert('合约内没有 LP 可提！'); return; }
+      var lpStr = parseFloat(ethers.utils.formatEther(bal)).toFixed(6);
+      if (!confirm('确认提取 ' + lpStr + ' LP 代币到 owner 钱包？\n\n此操作仅转移 LP 代币，不会影响底池。')) return;
+      document.getElementById('btnWithdrawLP').disabled = true;
+      var tx = await contract.withdrawLP(bal);
+      await tx.wait(1);
+      var s = document.getElementById('lpStatus');
+      s.className = 'status ok';
+      s.textContent = '✅ 已提取 ' + lpStr + ' LP 到 owner 钱包';
+      refreshLPBalance();
+    } catch(e) {
+      var s2 = document.getElementById('lpStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnWithdrawLP').disabled = false; }
+  }
+
+  async function removeLiquidity() {
+    if (!contract) { alert('请先加载合约！'); return; }
+    try {
+      var pairAddr = await contract.uniswapV2Pair();
+      if (pairAddr === '0x0000000000000000000000000000000000000000') { alert('底池未创建！'); return; }
+      var pairAbi = ['function balanceOf(address) view returns (uint256)'];
+      var provider = new ethers.providers.Web3Provider(window.ethereum);
+      var pair = new ethers.Contract(pairAddr, pairAbi, provider);
+      var bal = await pair.balanceOf(contract.address);
+      if (bal.isZero()) { alert('合约内没有 LP 可撤！'); return; }
+      var lpStr = parseFloat(ethers.utils.formatEther(bal)).toFixed(6);
+      if (!confirm('⚠️ 确认撤除底池？\n\n将销毁 ' + lpStr + ' LP 代币，取回对应的代币和 BNB 到 owner 钱包。\n\n⚠️ 底池流动性将减少！')) return;
+      document.getElementById('btnRemoveLiq').disabled = true;
+      var tx = await contract.removeLiquidity(bal);
+      await tx.wait(1);
+      var s = document.getElementById('lpStatus');
+      s.className = 'status ok';
+      s.textContent = '✅ 已撤除 ' + lpStr + ' LP，代币+BNB 已转回 owner';
+      refreshLPBalance();
+    } catch(e) {
+      var s2 = document.getElementById('lpStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnRemoveLiq').disabled = false; }
+  }
+
+  async function rescueToken() {
+    if (!contract) { alert('请先加载合约！'); return; }
+    try {
+      var tokenAddr = document.getElementById('rescueTokenAddr').value.trim();
+      if (!tokenAddr || tokenAddr.length < 42) { alert('请填写有效的代币地址！'); return; }
+      var amtStr = document.getElementById('rescueTokenAmt').value.trim();
+      var amount;
+      if (!amtStr || amtStr === '0') {
+        // 自动获取该代币的全部余额
+        var tokenAbi = ['function balanceOf(address) view returns (uint256)'];
+        var provider = new ethers.providers.Web3Provider(window.ethereum);
+        var token = new ethers.Contract(tokenAddr, tokenAbi, provider);
+        var bal = await token.balanceOf(contract.address);
+        if (bal.isZero()) { alert('合约内该代币余额为 0，无需提取！'); return; }
+        amount = bal;
+        document.getElementById('rescueTokenAmt').value = ethers.utils.formatEther(bal);
+      } else {
+        amount = ethers.utils.parseEther(amtStr);
+      }
+      var amtStr2 = parseFloat(ethers.utils.formatEther(amount)).toFixed(6);
+      if (!confirm('确认提取 ' + amtStr2 + ' 枚代币\n\n地址：' + tokenAddr + '\n\n→ 发送到 owner 钱包')) return;
+      document.getElementById('btnRescueToken').disabled = true;
+      var tx = await contract.emergencyWithdrawToken(tokenAddr, amount);
+      await tx.wait(1);
+      var s = document.getElementById('rescueStatus');
+      s.className = 'status ok';
+      s.textContent = '✅ 已提取 ' + amtStr2 + ' 枚代币到 owner';
+    } catch(e) {
+      var s2 = document.getElementById('rescueStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnRescueToken').disabled = false; }
   }
 
   async function enableTrading() {
