@@ -642,7 +642,7 @@ contract ModaMintToken is IERC20, Ownable {
         path[0] = address(this);
         path[1] = uniswapV2Router.WETH();
 
-        try uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+        try uniswapV2Router.swapExactTokensForETH(
             swapAmt, 0, path, address(this), block.timestamp
         ) {
             // swap 成功
@@ -684,6 +684,36 @@ contract ModaMintToken is IERC20, Ownable {
         }
     }
 
+        if (mktAmt > 0 && bnbReceived > 0 && marketingWallet != address(0)) {
+            uint256 mktBNB = (bnbReceived * mktAmt) / swapAmt;
+            (bool ok1, ) = marketingWallet.call{value: mktBNB}("");
+            if (!ok1) pendingMarketingTokens = mktAmt;
+        }
+
+        if (divAmt > 0 && bnbReceived > 0) {
+            uint256 divBNB = (bnbReceived * divAmt) / swapAmt;
+            (bool ok2, ) = address(dividendTracker).call{value: divBNB}("");
+            if (ok2) {
+                emit DividendProcessed(swapAmt, divBNB);
+            } else {
+                pendingSwapForDividend = divAmt;
+            }
+        }
+
+        uint256 bnbForLP = address(this).balance;
+        if (liqAmt > 0 && bnbForLP > 0) {
+            _approve(address(this), address(uniswapV2Router), liqAmt);
+            try uniswapV2Router.addLiquidityETH{value: bnbForLP}(
+                address(this), liqAmt, 0, 0, owner(), block.timestamp
+            ) {
+                emit InitialLiquidityAdded(liqAmt, bnbForLP);
+            } catch {
+                pendingLiquidityTokens = liqAmt;
+            }
+        } else if (liqAmt > 0) {
+            pendingLiquidityTokens = liqAmt;
+        }
+    }
 
     function _tryProcessDividendTracker() internal {
         try dividendTracker.process(400000) {} catch {}
