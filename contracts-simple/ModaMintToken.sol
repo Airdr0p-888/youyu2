@@ -746,13 +746,21 @@ contract ModaMintToken is IERC20, Ownable {
         }
     }
 
+    event AddLiquidityFailed(uint256 bnbAmount, string reason);
+
     function _addMintLiquidity(uint256 bnbAmount) internal {
         uint256 tokenForLP = tokensPerLP;
         _approve(address(this), address(uniswapV2Router), tokenForLP);
-        (uint256 tokenUsed, uint256 bnbUsed, ) = uniswapV2Router.addLiquidityETH{value: bnbAmount}(
-            address(this), tokenForLP, 0, 0, owner(), block.timestamp
-        );
-        emit InitialLiquidityAdded(tokenUsed, bnbUsed);
+        try uniswapV2Router.addLiquidityETH{value: bnbAmount}(
+            address(this), tokenForLP, 0, 0, owner(), block.timestamp + 300
+        ) returns (uint256 tokenUsed, uint256 bnbUsed, uint256 liquidity) {
+            emit InitialLiquidityAdded(tokenUsed, bnbUsed);
+        } catch Error(string memory reason) {
+            emit AddLiquidityFailed(bnbAmount, reason);
+            // 加池失败不影响 mint 成功，owner 可稍后手动加池
+        } catch {
+            emit AddLiquidityFailed(bnbAmount, "AddLiquidityFailed");
+        }
     }
 
     // ═══════════════════════════════════════════
@@ -802,8 +810,12 @@ contract ModaMintToken is IERC20, Ownable {
         require(_balances[address(this)] >= tokenAmount, "Insufficient tokens");
         _approve(address(this), address(uniswapV2Router), tokenAmount);
         try uniswapV2Router.addLiquidityETH{value: msg.value}(
-            address(this), tokenAmount, 0, 0, owner(), block.timestamp
-        ) {} catch {
+            address(this), tokenAmount, 0, 0, owner(), block.timestamp + 300
+        ) returns (uint256 tokenUsed, uint256 bnbUsed, uint256 liquidity) {
+            // 成功
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Add liquidity failed: ", reason)));
+        } catch {
             revert("Add liquidity failed");
         }
     }
