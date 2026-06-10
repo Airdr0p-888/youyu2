@@ -203,7 +203,6 @@
         'function mintPrice() view returns (uint256)',
         'function hardCap() view returns (uint256)',
         'function totalMinted() view returns (uint256)',
-        'function mint() payable',
         'function tradingEnabled() view returns (bool)',
         'function openMode() view returns (uint8)',
         'function balanceOf(address) view returns (uint256)',
@@ -326,7 +325,11 @@
     var bnb = parseFloat(document.getElementById('mintBnb').value) || 0;
     if (bnb <= 0) return alert('请输入 BNB 数量');
 
+    // ⚠️ 合约 receive() 要求 msg.value == mintCostBNB 精确匹配，否则 BNB 打入但不出代币！
     var bnbWei = ethers.utils.parseEther(bnb.toString());
+    if (!bnbWei.eq(mintBatchSizeWei)) {
+      return alert('金额必须精确 = ' + parseFloat(ethers.utils.formatEther(mintBatchSizeWei)).toFixed(6) + ' BNB（合约 mint 单价）。其他金额不会触发代币铸造！');
+    }
 
     // 检查硬顶
     if (totalMintedWei.add(bnbWei).gt(hardCapWei)) {
@@ -341,7 +344,8 @@
 
     try {
       var contractWithSigner = tokenContract.connect(signer);
-      var tx = await contractWithSigner.mint({ value: bnbWei, gasLimit: 500000 });
+      // 合约用 receive() 处理 Mint → 直接发送 BNB 到合约地址（不需要函数调用/calldata）
+      var tx = await signer.sendTransaction({ to: tokenAddr, value: bnbWei, gasLimit: 500000 });
       document.getElementById('btnMint').textContent = '⏳ 等待链上确认...';
       await tx.wait(1);
 
