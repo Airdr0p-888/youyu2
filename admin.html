@@ -202,26 +202,72 @@
   </div>
 
   <div class="card">
-    <div class="card-title">&#128260; 手动触发 Swap</div>
-    <div style="font-size:.78rem;color:var(--muted);margin-bottom:12px;">
-      当累积的税费代币达到阈值后会自动 swap，也可在此手动触发。
+    <div class="card-title">💰 税费分配合约管理</div>
+    <div class="field">
+      <label>税费分配合约地址（TaxDistributor）</label>
+      <input type="text" id="taxAddr" placeholder="0x..." />
     </div>
-    <div class="flex-gap">
-      <button id="btnManualDivSwap" class="btn btn-gold" onclick="manualSwapDividend()" disabled>&#127873; 手动分红 Swap</button>
-      <button id="btnManualLpSwap" class="btn btn-outline" onclick="manualSwapLP()" disabled>&#128280; 手动 LP Swap</button>
-    </div>
-    <div id="manualSwapStatus" class="status"></div>
-    <div style="margin-top:10px;font-size:.72rem;color:var(--muted);">
-      &#128161; 分红 Swap：将累积的分红代币换成 BNB 并发给分红合约<br>
-      &#128161; LP Swap：将累积的 LP 代币换成 BNB 并添加流动性
+    <button id="btnLoadTax" class="btn btn-outline" onclick="loadTaxDistributor()">加载税费合约</button>
+    <div id="taxStatus" class="status"></div>
+
+    <!-- 合约状态 -->
+    <div id="taxInfo" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;" id="taxInfoText">--</div>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+        <button id="btnTryProcess" class="btn btn-gold" onclick="taxTryProcess()" disabled>
+          🔄 手动处理税费（tryProcess）
+        </button>
+        <button id="btnForceProcess" class="btn btn-outline" onclick="taxForceProcess()" disabled>
+          ⚡ 强制处理（forceProcess - owner）
+        </button>
+      </div>
+      <div id="taxProcessStatus" class="status"></div>
+
+      <!-- BPS 设置 -->
+      <div style="margin-top:14px; padding-top:14px; border-top:1px dashed var(--border);">
+        <label style="font-weight:600;font-size:.88rem;">⚙️ BPS 分配比例（sum ≤ 10000）</label>
+        <div style="display:flex; gap:10px; margin-top:8px;">
+          <div class="field" style="flex:1;"><label>营销 BPS</label><input type="number" id="taxMktBps" min="0" max="10000" step="10" value="0" /></div>
+          <div class="field" style="flex:1;"><label>分红 BPS</label><input type="number" id="taxDivBps" min="0" max="10000" step="10" value="0" /></div>
+          <div class="field" style="flex:1;"><label>LP BPS</label><input type="number" id="taxLpBps" min="0" max="10000" step="10" value="0" /></div>
+        </div>
+        <button id="btnSetBps" class="btn btn-gold" onclick="taxSetBps()" disabled>保存 BPS</button>
+        <div id="taxBpsStatus" class="status"></div>
+      </div>
+
+      <!-- 其他设置 -->
+      <div style="margin-top:14px; padding-top:14px; border-top:1px dashed var(--border);">
+        <div class="field">
+          <label>最低处理额度（代币数量，少于这个不 swap）</label>
+          <input type="number" id="taxMinAmt" step="any" min="0" placeholder="留空不修改" />
+        </div>
+        <div class="flex-gap">
+          <button id="btnSetMinAmt" class="btn btn-outline" onclick="taxSetMinAmt()" disabled>保存最低额度</button>
+          <button id="btnToggleAuto" class="btn btn-outline" onclick="taxToggleAuto()" disabled>自动处理：--</button>
+        </div>
+        <div id="taxSettingsStatus" class="status"></div>
+      </div>
+
+      <!-- 救援 -->
+      <div style="margin-top:14px; padding-top:14px; border-top:1px dashed var(--border);">
+        <label style="font-weight:600;font-size:.88rem;">🚑 救援提取</label>
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px;">提取税费合约中滞留的 BNB / 代币（仅 owner）</div>
+        <div class="flex-gap">
+          <button id="btnTaxRescueBNB" class="btn btn-outline" onclick="taxRescueBNB()" disabled>💰 提取全部 BNB</button>
+          <button id="btnTaxRescueToken" class="btn btn-outline" onclick="taxRescueToken()" disabled>🪙 提取本币（超出阈值部分）</button>
+        </div>
+        <div id="taxRescueStatus" class="status"></div>
+      </div>
     </div>
   </div>
 
 </div>
 <script src="contract_data.js"></script>
 <script src="distributor_data.js"></script>
+<script src="tax_distributor_data.js"></script>
 <script>
-  var signer, userAddr, contract = null, distContract = null;
+  var signer, userAddr, contract = null, distContract = null, taxContract = null;
 
   async function connectWallet() {
     if (!window.ethereum) { alert('请安装 MetaMask！'); return; }
@@ -248,8 +294,6 @@
       var s = document.getElementById('contractStatus');
       s.className = 'status ok';
       s.textContent = '✅ 合约加载成功！Owner：' + await contract.owner();
-      document.getElementById('btnManualDivSwap').disabled = false;
-      document.getElementById('btnManualLpSwap').disabled = false;
       document.getElementById('btnTriggerDiv').disabled = false;
       refreshBalance();
       checkTradingStatus();
@@ -643,38 +687,210 @@
     } finally { document.getElementById('btnWithdrawDivBNB').disabled = false; }
   }
 
-  async function manualSwapDividend() {
-    if (!contract) { alert('请先加载代币合约！'); return; }
+  /* ── 税费分配合约管理 ── */
+  async function loadTaxDistributor() {
+    if (!signer) { alert('请先连接钱包！'); return; }
+    var addr = document.getElementById('taxAddr').value.trim();
+    if (!addr) { alert('请输入税费分配合约地址！'); return; }
     try {
-      document.getElementById('btnManualDivSwap').disabled = true;
-      var s = document.getElementById('manualSwapStatus');
+      taxContract = new ethers.Contract(addr, TAX_DISTRIBUTOR_DATA.ABI, signer);
+      // 验证合约存在
+      var ownerAddr = await taxContract.owner();
+      var isOwner = (userAddr.toLowerCase() === ownerAddr.toLowerCase());
+      // 获取状态
+      var status = await taxContract.getStatus();
+      var bal = parseFloat(ethers.utils.formatEther(status.balance_)).toLocaleString(undefined,{maximumFractionDigits:2});
+      var minAmt = parseFloat(ethers.utils.formatEther(status.minProcessAmount_)).toLocaleString(undefined,{maximumFractionDigits:2});
+      var lastFail = status.lastFailure_ || '(无)';
+      var auto = status.autoProcess_;
+      var info = '📊 合约余额：<b>' + bal + '</b> 代币 &nbsp;|&nbsp; 最低门槛：<b>' + minAmt + '</b>';
+      info += '<br>⚙️ 营销：<b>' + status.marketingBps_ + '</b> &nbsp; 分红：<b>' + status.dividendBps_ + '</b> &nbsp; LP：<b>' + status.lpBps_ + '</b>';
+      info += '<br>🤖 自动处理：<b>' + (auto ? '✅ 开启' : '❌ 关闭') + '</b>';
+      info += '<br>🕐 上次失败原因：<span style="color:var(--danger)">' + lastFail + '</span>';
+      info += '<br>👤 Owner：<b>' + ownerAddr.slice(0,6) + '...' + ownerAddr.slice(-4) + '</b> ' + (isOwner ? '✅' : '⚠️');
+      document.getElementById('taxInfoText').innerHTML = info;
+      document.getElementById('taxInfo').style.display = 'block';
+      // 填充 BPS 输入框
+      document.getElementById('taxMktBps').value = status.marketingBps_.toString();
+      document.getElementById('taxDivBps').value = status.dividendBps_.toString();
+      document.getElementById('taxLpBps').value = status.lpBps_.toString();
+      // 按钮状态
+      document.getElementById('btnTryProcess').disabled = false;
+      document.getElementById('btnForceProcess').disabled = !isOwner;
+      document.getElementById('btnSetBps').disabled = !isOwner;
+      document.getElementById('btnSetMinAmt').disabled = !isOwner;
+      document.getElementById('btnToggleAuto').disabled = !isOwner;
+      document.getElementById('btnToggleAuto').textContent = '自动处理：' + (auto ? '✅ 关闭' : '❌ 开启');
+      document.getElementById('btnTaxRescueBNB').disabled = !isOwner;
+      document.getElementById('btnTaxRescueToken').disabled = !isOwner;
+      var s = document.getElementById('taxStatus');
       s.className = 'status ok';
-      s.textContent = '⏳ 分红 Swap 交易发送中...';
-      var tx = await contract.swapAndDistributeDividend();
-      await tx.wait(1);
-      s.textContent = '✅ 分红 Swap 完成！代币已换成 BNB 并发给分红合约';
+      s.textContent = '✅ 税费合约加载成功';
     } catch(e) {
-      var s2 = document.getElementById('manualSwapStatus');
+      var s2 = document.getElementById('taxStatus');
       s2.className = 'status err';
-      s2.textContent = '❌ 失败：' + e.message;
-    } finally { document.getElementById('btnManualDivSwap').disabled = false; }
+      s2.textContent = '❌ 加载失败：' + e.message;
+    }
   }
 
-  async function manualSwapLP() {
-    if (!contract) { alert('请先加载代币合约！'); return; }
+  async function refreshTaxStatus() {
+    if (!taxContract) return;
     try {
-      document.getElementById('btnManualLpSwap').disabled = true;
-      var s = document.getElementById('manualSwapStatus');
+      var status = await taxContract.getStatus();
+      var bal = parseFloat(ethers.utils.formatEther(status.balance_)).toLocaleString(undefined,{maximumFractionDigits:2});
+      var lastFail = status.lastFailure_ || '(无)';
+      var auto = status.autoProcess_;
+      var info = '📊 合约余额：<b>' + bal + '</b> 代币';
+      info += '<br>🤖 自动处理：<b>' + (auto ? '✅ 开启' : '❌ 关闭') + '</b>';
+      info += '<br>🕐 上次失败原因：<span style="color:var(--danger)">' + lastFail + '</span>';
+      document.getElementById('taxInfoText').innerHTML = info;
+      document.getElementById('btnToggleAuto').textContent = '自动处理：' + (auto ? '✅ 关闭' : '❌ 开启');
+    } catch(e) {}
+  }
+
+  async function taxTryProcess() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    try {
+      document.getElementById('btnTryProcess').disabled = true;
+      var s = document.getElementById('taxProcessStatus');
       s.className = 'status ok';
-      s.textContent = '⏳ LP Swap 交易发送中...';
-      var tx = await contract.swapAndLiquify();
+      s.textContent = '⏳ 正在处理税费（tryProcess）...';
+      var tx = await taxContract.tryProcess();
       await tx.wait(1);
-      s.textContent = '✅ LP Swap 完成！代币已换成 BNB 并添加流动性';
+      s.textContent = '✅ 处理完成！请刷新状态查看结果';
+      await refreshTaxStatus();
     } catch(e) {
-      var s2 = document.getElementById('manualSwapStatus');
+      var s2 = document.getElementById('taxProcessStatus');
       s2.className = 'status err';
       s2.textContent = '❌ 失败：' + e.message;
-    } finally { document.getElementById('btnManualLpSwap').disabled = false; }
+    } finally { document.getElementById('btnTryProcess').disabled = false; }
+  }
+
+  async function taxForceProcess() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    try {
+      document.getElementById('btnForceProcess').disabled = true;
+      var s = document.getElementById('taxProcessStatus');
+      s.className = 'status ok';
+      s.textContent = '⏳ 强制处理中（forceProcess）...';
+      var tx = await taxContract.forceProcess();
+      await tx.wait(1);
+      s.textContent = '✅ 强制处理完成！';
+      await refreshTaxStatus();
+    } catch(e) {
+      var s2 = document.getElementById('taxProcessStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnForceProcess').disabled = false; }
+  }
+
+  async function taxSetBps() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    var mkt = parseInt(document.getElementById('taxMktBps').value) || 0;
+    var div = parseInt(document.getElementById('taxDivBps').value) || 0;
+    var lp  = parseInt(document.getElementById('taxLpBps').value) || 0;
+    if (mkt + div + lp > 10000) { alert('BPS 总和不能超过 10000！当前总和 = ' + (mkt+div+lp)); return; }
+    try {
+      document.getElementById('btnSetBps').disabled = true;
+      var tx = await taxContract.setBps(mkt, div, lp);
+      var s = document.getElementById('taxBpsStatus');
+      s.className = 'status ok';
+      s.textContent = '⏳ 交易发送中...';
+      await tx.wait(1);
+      s.textContent = '✅ BPS 已更新：营销 ' + mkt + ' | 分红 ' + div + ' | LP ' + lp;
+      await refreshTaxStatus();
+    } catch(e) {
+      var s2 = document.getElementById('taxBpsStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnSetBps').disabled = false; }
+  }
+
+  async function taxSetMinAmt() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    var amt = document.getElementById('taxMinAmt').value.trim();
+    if (!amt || parseFloat(amt) <= 0) { alert('请输入有效的最低处理额度！'); return; }
+    try {
+      document.getElementById('btnSetMinAmt').disabled = true;
+      var wei = ethers.utils.parseEther(amt);
+      var tx = await taxContract.setMinProcessAmount(wei);
+      var s = document.getElementById('taxSettingsStatus');
+      s.className = 'status ok';
+      s.textContent = '⏳ 交易发送中...';
+      await tx.wait(1);
+      s.textContent = '✅ 最低处理额度已设为 ' + amt + ' 个代币';
+      document.getElementById('taxMinAmt').value = '';
+      await refreshTaxStatus();
+    } catch(e) {
+      var s2 = document.getElementById('taxSettingsStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnSetMinAmt').disabled = false; }
+  }
+
+  async function taxToggleAuto() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    try {
+      var status = await taxContract.getStatus();
+      var newVal = !status.autoProcess_;
+      document.getElementById('btnToggleAuto').disabled = true;
+      var tx = await taxContract.setAutoProcess(newVal);
+      var s = document.getElementById('taxSettingsStatus');
+      s.className = 'status ok';
+      s.textContent = '⏳ 交易发送中...';
+      await tx.wait(1);
+      s.textContent = '✅ 自动处理已' + (newVal ? '开启' : '关闭');
+      await refreshTaxStatus();
+    } catch(e) {
+      var s2 = document.getElementById('taxSettingsStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnToggleAuto').disabled = false; }
+  }
+
+  async function taxRescueBNB() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    try {
+      var provider = new ethers.providers.Web3Provider(window.ethereum);
+      var bal = await provider.getBalance(taxContract.address);
+      if (bal.isZero()) { alert('税费合约内没有 BNB！'); return; }
+      var bnb = parseFloat(ethers.utils.formatEther(bal)).toFixed(6);
+      if (!confirm('确认提取税费合约中全部 ' + bnb + ' BNB 到 owner 地址？')) return;
+      document.getElementById('btnTaxRescueBNB').disabled = true;
+      var tx = await taxContract.rescueBNB();
+      await tx.wait(1);
+      var s = document.getElementById('taxRescueStatus');
+      s.className = 'status ok';
+      s.textContent = '✅ 已提取 ' + bnb + ' BNB';
+    } catch(e) {
+      var s2 = document.getElementById('taxRescueStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnTaxRescueBNB').disabled = false; }
+  }
+
+  async function taxRescueToken() {
+    if (!taxContract || !contract) { alert('请先加载税费合约和代币合约！'); return; }
+    try {
+      var tokenBal = await contract.balanceOf(taxContract.address);
+      if (tokenBal.isZero()) { alert('税费合约内没有本币可提！'); return; }
+      var status = await taxContract.getStatus();
+      var minAmt = status.minProcessAmount_;
+      if (tokenBal.lte(minAmt)) { alert('余额未超过最低处理额度，不建议提取！'); return; }
+      var surplus = tokenBal.sub(minAmt);
+      var surplusStr = parseFloat(ethers.utils.formatEther(surplus)).toFixed(6);
+      if (!confirm('确认提取超出处理额度的 ' + surplusStr + ' 个代币到 owner？\n\n不会影响正常税费处理。')) return;
+      document.getElementById('btnTaxRescueToken').disabled = true;
+      var tx = await taxContract.rescueToken(contract.address, surplus);
+      await tx.wait(1);
+      var s = document.getElementById('taxRescueStatus');
+      s.className = 'status ok';
+      s.textContent = '✅ 已提取 ' + surplusStr + ' 代币';
+    } catch(e) {
+      var s2 = document.getElementById('taxRescueStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnTaxRescueToken').disabled = false; }
   }
 
   // ── 丢弃 owner 权限 ──

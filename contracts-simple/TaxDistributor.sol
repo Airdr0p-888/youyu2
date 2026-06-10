@@ -416,7 +416,8 @@ contract TaxDistributor is Ownable {
         uint256 dividendBps_,
         uint256 lpBps_,
         string memory lastFailure_,
-        uint256 lastProcessTime_
+        uint256 lastProcessTime_,
+        bool autoProcess_
     ) {
         return (
             token,
@@ -426,7 +427,8 @@ contract TaxDistributor is Ownable {
             dividendBps,
             lpBps,
             lastFailureReason,
-            lastProcessTime
+            lastProcessTime,
+            autoProcess
         );
     }
 }
