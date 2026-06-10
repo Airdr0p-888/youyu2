@@ -63,14 +63,21 @@ fs.writeFileSync(path.join(ROOT, 'standard-input.json'), JSON.stringify({
 }, null, 2));
 console.log('✅ standard-input.json 已更新（BscScan 验证用）');
 
-/* ── 编译 TaxDistributor ── */
-console.log('⚙️  编译 TaxDistributor (viaIR=' + VIA_IR + ', runs=' + OPTIMIZE + ')...');
+/* ── 编译 TaxDistributor ──
+   注意：TaxDistributor 不使用 viaIR，因为 viaIR 生成的"重入哨兵"
+   (reentrancy sentry) 代码在嵌套 try/catch 场景下导致 gas 消耗爆炸，
+   引发 "out of gas: not enough gas for reentrancy sentry" 错误。
+   TaxDistributor 合约体积小，不需要 viaIR，且 optimizer.runs=10000
+   可以更好地优化运行时 gas（swap/加池都是高频操作）。 */
+const TAX_VIA_IR   = false;
+const TAX_OPTIMIZE = 10000;
+console.log('⚙️  编译 TaxDistributor (viaIR=' + TAX_VIA_IR + ', runs=' + TAX_OPTIMIZE + ')...');
 const taxInput = JSON.stringify({
   language: 'Solidity',
   sources: { 'TaxDistributor.sol': { content: taxSrc } },
   settings: {
-    viaIR: VIA_IR,
-    optimizer: { enabled: true, runs: OPTIMIZE },
+    viaIR: TAX_VIA_IR,
+    optimizer: { enabled: true, runs: TAX_OPTIMIZE },
     evmVersion: 'london',
     outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'], '': ['id'] } }
   }

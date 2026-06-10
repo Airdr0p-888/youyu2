@@ -755,7 +755,7 @@
       var s = document.getElementById('taxProcessStatus');
       s.className = 'status ok';
       s.textContent = '⏳ 正在处理税费（tryProcess）...';
-      var tx = await taxContract.tryProcess();
+      var tx = await taxContract.tryProcess({gasLimit: 2000000});
       await tx.wait(1);
       s.textContent = '✅ 处理完成！请刷新状态查看结果';
       await refreshTaxStatus();
@@ -773,7 +773,7 @@
       var s = document.getElementById('taxProcessStatus');
       s.className = 'status ok';
       s.textContent = '⏳ 强制处理中（forceProcess）...';
-      var tx = await taxContract.forceProcess();
+      var tx = await taxContract.forceProcess({gasLimit: 2000000});
       await tx.wait(1);
       s.textContent = '✅ 强制处理完成！';
       await refreshTaxStatus();
