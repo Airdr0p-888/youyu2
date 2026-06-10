@@ -64,7 +64,7 @@
     <div class="field">
       <label>地址列表（每行一个，或逗号分隔）</label>
       <textarea id="addAddresses" placeholder="0x1234...&#10;0xabcd...&#10;或 0x1234...,0xabcd..."></textarea>
-      <div style="font-size:.7rem;color:var(--muted);margin-top:4px;">将批量调用 addToWhitelist(address[])</div>
+      <div style="font-size:.7rem;color:var(--muted);margin-top:4px;">将批量调用 addWhitelist(address[])</div>
     </div>
     <button id="btnAdd" class="btn btn-gold" onclick="addWhitelist()">添加白名单</button>
     <div id="addStatus" class="status"></div>
@@ -356,7 +356,7 @@
     if (addrs.length === 0) { alert('没有有效地址！'); return; }
     try {
       document.getElementById('btnAdd').disabled = true;
-      var tx = await contract.addToWhitelist(addrs);
+      var tx = await contract.addWhitelist(addrs);
       await tx.wait(1);
       var s = document.getElementById('addStatus');
       s.className = 'status ok';
@@ -375,7 +375,7 @@
     if (!addr) { alert('请输入地址！'); return; }
     try {
       document.getElementById('btnRrm').disabled = true;
-      var tx = await contract.removeFromWhitelist(addr);
+      var tx = await contract.removeWhitelist([addr]);
       await tx.wait(1);
       var s = document.getElementById('rmStatus');
       s.className = 'status ok';
@@ -580,7 +580,7 @@
     try {
       var btn = on ? document.getElementById('btnWOn') : document.getElementById('btnWOff');
       btn.disabled = true;
-      var tx = await contract.setWhitelistOnly(on);
+      var tx = await contract.setWhitelistMintOnly(on);
       await tx.wait(1);
       var s = document.getElementById('wlStatus');
       s.className = 'status ok';

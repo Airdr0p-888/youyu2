@@ -413,15 +413,14 @@ const TOKEN_ABI = [
   {"inputs":[],"name":"liquidityAdded","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
   {"inputs":[],"name":"presaleFinalized","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
   {"inputs":[],"name":"isPlatformProject","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"name":"","type":"address"}],"name":"whitelisted","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
-  {"inputs":[],"name":"getAllWhitelisted","outputs":[{"name":"","type":"address[]"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"name":"","type":"address"}],"name":"whitelist","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
   // write
   {"inputs":[],"name":"enableTrading","outputs":[],"stateMutability":"nonpayable","type":"function"},
   {"inputs":[],"name":"emergencyPause","outputs":[],"stateMutability":"nonpayable","type":"function"},
   {"inputs":[],"name":"finalizePresale","outputs":[],"stateMutability":"payable","type":"function"},
   {"inputs":[],"name":"processLiquidity","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"name":"_addr","type":"address"}],"name":"addToWhitelist","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"name":"_addr","type":"address"}],"name":"removeFromWhitelist","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"name":"users","type":"address[]"}],"name":"addWhitelist","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"name":"users","type":"address[]"}],"name":"removeWhitelist","outputs":[],"stateMutability":"nonpayable","type":"function"},
   {"inputs":[],"name":"renounceOwnership","outputs":[],"stateMutability":"nonpayable","type":"function"}
 ];
 
@@ -796,8 +795,8 @@ async function callContract(action){
     emergencyPause:       { label:'紧急暂停',          confirm:'确认暂停交易？\n\n仅平台 Guardian 可操作。',               abiKey:'token', method:'emergencyPause', args:[] },
     finalizePresale:     { label:'完成预售+注入LP',  confirm:'确认完成预售并注入流动性？\n\n① 结束预售\n② BNB→LP 注入 PancakeSwap\n③ LP token 发给退款合约\n\n此操作不可撤销！', abiKey:'token', method:'finalizePresale', args:[], value:'0' },
     processLiquidity:    { label:'注入LP',            confirm:'确认注入流动性？',                                   abiKey:'token', method:'processLiquidity', args:[] },
-    addToWhitelist:      { label:'添加白名单',        needInput:'wlAddInput',   confirm:'确认添加该地址到白名单？', abiKey:'token', method:'addToWhitelist', args:[null] },
-    removeFromWhitelist: { label:'移除白名单',        needInput:'wlRemoveInput',confirm:'确认从白名单移除该地址？',abiKey:'token', method:'removeFromWhitelist', args:[null] },
+    addToWhitelist:      { label:'添加白名单',        needInput:'wlAddInput',   confirm:'确认添加该地址到白名单？', abiKey:'token', method:'addWhitelist', args:[null], arrayArg:true },
+    removeFromWhitelist: { label:'移除白名单',        needInput:'wlRemoveInput',confirm:'确认从白名单移除该地址？',abiKey:'token', method:'removeWhitelist', args:[null], arrayArg:true },
     processDividend:     { label:'执行分红',          confirm:'确认执行分红分发？\n\n将消耗 gas 进行 swap + 分配',  abiKey:'dividend', method:'processDividend', args:[] },
     claimMyDividend:     { label:'领取分红',          confirm:'确认领取自己的分红？',                         abiKey:'dividend', method:'claimDividend', args:[] }
   };
@@ -810,7 +809,7 @@ async function callContract(action){
     const val = document.getElementById(act.needInput)?.value?.trim();
     if(!val){ alert('请输入地址'); return; }
     if(!val.startsWith('0x') || val.length !== 42){ alert('地址格式不正确（需要 42 字符的 0x 地址）'); return; }
-    act.args = [val];
+    act.args = act.arrayArg ? [[val]] : [val];
   }
 
   if(act.confirm && !confirm(act.confirm)) return;

@@ -587,7 +587,7 @@ async function deployToken() {
     var ABI      = CONTRACT_DATA.ABI;
     var BYTECODE = CONTRACT_DATA.BYTECODE;
 
-    // Encode 11 constructor arguments for ModaMintToken
+    // Encode 16 constructor arguments for ModaMintToken
     var iface = new ethers.utils.Interface(ABI);
     var encodedArgs = iface.encodeDeploy([
       name,                                    // 1. name_
@@ -597,10 +597,15 @@ async function deployToken() {
       fillWei,                                 // 5. fillBNB_
       ethers.BigNumber.from(buyTaxBps.toString()),   // 6. buyTax_
       ethers.BigNumber.from(sellTaxBps.toString()),  // 7. sellTax_
-      minDividendWei,                          // 8. minHoldForDividend_
-      ethers.BigNumber.from(presalePct.toString()),  // 9. presaleTokenPct_
-      whitelistOnly,                           // 10. whitelistMintOnly_
-      ethers.BigNumber.from(lpPct.toString())        // 11. lpTokenPct_
+      ethers.BigNumber.from(mktBps.toString()),     // 8. marketingPct_
+      ethers.BigNumber.from(burnBps.toString()),    // 9. burnPct_
+      ethers.BigNumber.from(distBps.toString()),    // 10. dividendPct_
+      ethers.BigNumber.from(lpBps.toString()),      // 11. liquidityPct_
+      marketingWalletAddr,                     // 12. marketingWallet_
+      minDividendWei,                          // 13. minHoldForDividend_
+      ethers.BigNumber.from(presalePct.toString()),  // 14. presaleTokenPct_
+      whitelistOnly,                           // 15. whitelistMintOnly_
+      ethers.BigNumber.from(lpPct.toString())        // 16. lpTokenPct_
     ]).slice(2);
 
     var creationCode = BYTECODE + encodedArgs;
@@ -629,6 +634,11 @@ async function deployToken() {
         mintCostWei, fillWei,
         ethers.BigNumber.from(buyTaxBps.toString()),
         ethers.BigNumber.from(sellTaxBps.toString()),
+        ethers.BigNumber.from(mktBps.toString()),
+        ethers.BigNumber.from(burnBps.toString()),
+        ethers.BigNumber.from(distBps.toString()),
+        ethers.BigNumber.from(lpBps.toString()),
+        marketingWalletAddr,
         minDividendWei,
         ethers.BigNumber.from(presalePct.toString()),
         whitelistOnly,
