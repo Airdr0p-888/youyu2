@@ -89,6 +89,30 @@
     <div id="wlStatus" class="status"></div>
   </div>
 
+  <div class="card" style="border:2px solid var(--gold);background:rgba(255,215,0,0.04);">
+    <div class="card-title">🔁 白名单 Mint 次数管理</div>
+    <div class="hint" style="margin-bottom:8px;">白名单模式下，每个钱包只能 Mint 一次。可查看/重置状态。</div>
+
+    <!-- 查看是否已 Mint -->
+    <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px;">
+      <div class="field" style="flex:1;margin-bottom:0;">
+        <label>查询地址是否已 Mint</label>
+        <input type="text" id="checkMintedAddr" placeholder="0x..." style="font-family:var(--monospace);" />
+      </div>
+      <button class="btn btn-outline" onclick="checkHasMinted()" style="margin-bottom:4px;">查询</button>
+    </div>
+    <div id="checkMintedStatus" class="status" style="margin-bottom:8px;"></div>
+
+    <!-- 重置 Mint 状态（批量） -->
+    <div style="margin-top:8px;padding-top:8px;border-top:1px dotted var(--border);">
+      <label style="font-size:.78rem;color:var(--muted);">重置 Mint 状态（批量，每行一个或逗号分隔）</label>
+      <textarea id="resetMintedInput" placeholder="0x1234...&#10;0xabcd...&#10;或 0x1234...,0xabcd..." style="min-height:48px;"></textarea>
+      <div style="font-size:.7rem;color:var(--muted);margin:4px 0 8px;">将批量调用 resetWhitelistMinted(address[])</div>
+      <button id="btnResetMinted" class="btn btn-outline" onclick="resetWhitelistMinted()" style="border-color:var(--danger);color:var(--danger);">🔄 重置选中地址的 Mint 状态</button>
+      <div id="resetMintedStatus" class="status"></div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-title">&#128640; 开启交易</div>
     <div style="font-size:.78rem;color:var(--muted);margin-bottom:12px;">
@@ -266,9 +290,10 @@
         <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px;">提取税费合约中滞留的 BNB / 代币 / LP 到指定钱包（仅 owner）</div>
 
         <!-- 目标钱包 -->
-        <div class="field" style="margin-bottom:8px;">
-          <label>接收钱包地址（留空 = owner）</label>
-          <input type="text" id="taxRescueTo" placeholder="0x... 留空默认 owner" style="font-family:var(--monospace);" />
+        <div class="field" style="margin-bottom:6px;">
+          <label style="font-weight:700;color:var(--gold);font-size:.82rem;">📥 接收钱包地址（留空 = owner，即你本人）</label>
+          <input type="text" id="taxRescueTo" placeholder="0xAbCdEf... 填了地址就提到该钱包" style="font-family:var(--monospace);font-size:.82rem;padding:10px 12px;border:2px solid var(--gold);background:rgba(255,215,0,0.06);" oninput="_taxRescueTo()" />
+          <div id="taxRescueToHint" style="font-size:.7rem;color:var(--muted);margin-top:2px;">⚠️ 当前未填写 → 默认提到 owner 钱包</div>
         </div>
 
         <!-- BNB 提取 -->
@@ -318,9 +343,9 @@
   </div>
 
 </div>
-<script src="contract_data.js"></script>
-<script src="distributor_data.js"></script>
-<script src="tax_distributor_data.js"></script>
+<script src="contract_data.js?v=202606101905"></script>
+<script src="distributor_data.js?v=202606101905"></script>
+<script src="tax_distributor_data.js?v=202606101905"></script>
 <script>
   var signer, userAddr, contract = null, distContract = null, taxContract = null;
 
@@ -604,6 +629,54 @@
     } finally {
       document.getElementById('btnWOn').disabled = false;
       document.getElementById('btnWOff').disabled = false;
+    }
+  }
+
+  /* ── 白名单 Mint 次数管理 ── */
+  async function checkHasMinted() {
+    if (!contract) { alert('请先加载合约！'); return; }
+    var addr = document.getElementById('checkMintedAddr').value.trim();
+    if (!ethers.utils.isAddress(addr)) { alert('请输入有效的地址！'); return; }
+    try {
+      var minted = await contract.hasMinted(addr);
+      var s = document.getElementById('checkMintedStatus');
+      if (minted) {
+        s.className = 'status err';
+        s.textContent = '✅ 该地址已 Mint 过（不能再 Mint）';
+      } else {
+        s.className = 'status ok';
+        s.textContent = '⚪ 该地址尚未 Mint（可以 Mint）';
+      }
+    } catch(e) {
+      document.getElementById('checkMintedStatus').className = 'status err';
+      document.getElementById('checkMintedStatus').textContent = '❌ 查询失败：' + (e.message || e);
+    }
+  }
+
+  async function resetWhitelistMinted() {
+    if (!contract) { alert('请先加载合约！'); return; }
+    var raw = document.getElementById('resetMintedInput').value.trim();
+    if (!raw) { alert('请输入要重置的地址！'); return; }
+    var addrs = raw.split(/[\n,\s;]+/).map(s=>s.trim()).filter(Boolean);
+    addrs = [...new Set(addrs)];
+    if (addrs.length === 0) { alert('没有有效地址！'); return; }
+    if (!confirm('确认重置以下 ' + addrs.length + ' 个地址的 Mint 状态？\n（重置后这些地址可以再次 Mint）\n\n' + addrs.slice(0,5).join('\n') + (addrs.length > 5 ? '\n...等共 ' + addrs.length + ' 个' : ''))) return;
+    try {
+      document.getElementById('btnResetMinted').disabled = true;
+      var tx = await contract.resetWhitelistMinted(addrs);
+      var s = document.getElementById('resetMintedStatus');
+      s.className = 'status';
+      s.textContent = '⏳ 等待确认...';
+      await tx.wait(1);
+      s.className = 'status ok';
+      s.textContent = '✅ 已重置 ' + addrs.length + ' 个地址的 Mint 状态';
+      document.getElementById('resetMintedInput').value = '';
+    } catch(e) {
+      var s2 = document.getElementById('resetMintedStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + (e.message || e);
+    } finally {
+      document.getElementById('btnResetMinted').disabled = false;
     }
   }
 
@@ -938,13 +1011,27 @@
 
   function _taxRescueTo() {
     var v = document.getElementById('taxRescueTo').value.trim();
-    return v || null; // null → 让合约用默认行为（实际必须传地址，回退到 owner）
+    var hint = document.getElementById('taxRescueToHint');
+    if (!v) {
+      hint.textContent = '⚠️ 当前未填写 → 默认提到 owner 钱包（' + (userAddr || '未连接') + '）';
+      hint.style.color = 'var(--muted)';
+      return null;
+    }
+    if (!ethers.utils.isAddress(v)) {
+      hint.textContent = '❌ 地址格式无效！必须是 42 位 0x 开头的地址';
+      hint.style.color = 'var(--danger)';
+      return null;
+    }
+    hint.textContent = '✅ 将提取到：' + v;
+    hint.style.color = 'var(--green)';
+    return v;
   }
 
   async function taxRescueBNB() {
     if (!taxContract) { alert('请先加载税费合约！'); return; }
     try {
       var toAddr = _taxRescueTo() || userAddr;
+      if (!ethers.utils.isAddress(toAddr)) { alert('请输入有效的接收钱包地址！'); return; }
       var amtStr = document.getElementById('taxRescueBnbAmt').value.trim();
       var provider = new ethers.providers.Web3Provider(window.ethereum);
       var bal = await provider.getBalance(taxContract.address);
@@ -978,6 +1065,7 @@
     if (!taxContract || !contract) { alert('请先加载税费合约和代币合约！'); return; }
     try {
       var toAddr = _taxRescueTo() || userAddr;
+      if (!ethers.utils.isAddress(toAddr)) { alert('请输入有效的接收钱包地址！'); return; }
       var amtStr = document.getElementById('taxRescueTokenAmt').value.trim();
       var tokenBal = await contract.balanceOf(taxContract.address);
       if (tokenBal.isZero()) { alert('税费合约内没有本币可提！'); return; }
@@ -1014,6 +1102,7 @@
     if (!taxContract) { alert('请先加载税费合约！'); return; }
     try {
       var toAddr = _taxRescueTo() || userAddr;
+      if (!ethers.utils.isAddress(toAddr)) { alert('请输入有效的接收钱包地址！'); return; }
       var tokenAddr = document.getElementById('taxRescueAnyAddr').value.trim();
       if (!ethers.utils.isAddress(tokenAddr)) { alert('请输入有效的代币地址！'); return; }
       var amtStr = document.getElementById('taxRescueAnyAmt').value.trim();
@@ -1052,6 +1141,7 @@
     if (!taxContract) { alert('请先加载税费合约！'); return; }
     try {
       var toAddr = _taxRescueTo() || userAddr;
+      if (!ethers.utils.isAddress(toAddr)) { alert('请输入有效的接收钱包地址！'); return; }
       var pairAddr = document.getElementById('taxRescueLPAddr').value.trim();
       if (!ethers.utils.isAddress(pairAddr)) { alert('请输入有效的 LP Token 地址！'); return; }
 

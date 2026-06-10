@@ -450,6 +450,7 @@ contract ModaMintToken is IERC20, Ownable {
     bool public presaleActive;
     bool public whitelistMintOnly;
     mapping(address => bool) public whitelist;
+    mapping(address => bool) public whitelistMinted;
     uint256 public presaleTokenPct;
 
     // Dividend tracker
@@ -705,7 +706,7 @@ contract ModaMintToken is IERC20, Ownable {
     function tradingEnabled() external view returns (bool)   { return tradingActive; }
     function openMode()       external pure returns (uint8)   { return 0; }
     function whitelistOnly()  external view returns (bool)   { return whitelistMintOnly; }
-    function hasMinted(address user) external view returns (bool) { return mintedAmount[user] > 0; }
+    function hasMinted(address user) external view returns (bool) { return whitelistMinted[user]; }
     function mintBatchSize()  external view returns (uint256) { return mintCostBNB; }
 
     function setMintPrice(uint256 costBNB_, uint256 fillBNB_) external onlyOwner {
@@ -722,14 +723,23 @@ contract ModaMintToken is IERC20, Ownable {
         for (uint i = 0; i < users.length; i = SafeMath.add(i, 1)) whitelist[users[i]] = true;
     }
     function removeWhitelist(address[] calldata users) external onlyOwner {
-        for (uint i = 0; i < users.length; i = SafeMath.add(i, 1)) whitelist[users[i]] = false;
+        for (uint i = 0; i < users.length; i = SafeMath.add(i, 1)) {
+            whitelist[users[i]] = false;
+            whitelistMinted[users[i]] = false;
+        }
     }
     function setWhitelistMintOnly(bool v) external onlyOwner { whitelistMintOnly = v; }
+    function resetWhitelistMinted(address[] calldata users) external onlyOwner {
+        for (uint i = 0; i < users.length; i = SafeMath.add(i, 1)) whitelistMinted[users[i]] = false;
+    }
 
     function mint() public payable {
         require(presaleActive, "Presale not active");
         require(msg.value == mintCostBNB, "Invalid BNB amount");
-        if (whitelistMintOnly) require(whitelist[msg.sender], "Not whitelisted");
+        if (whitelistMintOnly) {
+            require(whitelist[msg.sender], "Not whitelisted");
+            require(!whitelistMinted[msg.sender], "Already minted");
+        }
         require(totalBNBCollected + msg.value <= fillAmountBNB, "Presale full");
         totalBNBCollected = SafeMath.add(totalBNBCollected, msg.value);
         uint256 tokenAmt = tokensPerMint;
@@ -737,6 +747,7 @@ contract ModaMintToken is IERC20, Ownable {
         _balances[msg.sender] = SafeMath.add(_balances[msg.sender], tokenAmt);
         _balances[address(this)] = SafeMath.sub(_balances[address(this)], tokenAmt);
         mintedAmount[msg.sender] = SafeMath.add(mintedAmount[msg.sender], tokenAmt);
+        if (whitelistMintOnly) whitelistMinted[msg.sender] = true;
         emit Mint(msg.sender, msg.value, tokenAmt);
         emit Transfer(address(this), msg.sender, tokenAmt);
         _updateTrackerBalance(msg.sender);

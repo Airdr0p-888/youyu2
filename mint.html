@@ -382,6 +382,7 @@
       var msg = '';
       if (e.message && e.message.indexOf('user rejected') >= 0) msg = '用户在钱包中取消';
       else if (e.message && e.message.indexOf('insufficient funds') >= 0) msg = 'BNB 余额不足';
+      else if (e.message && e.message.indexOf('Already minted') >= 0) msg = '每个白名单钱包只能 Mint 一次，您已完成！';
       else if (e.data && e.data.message) msg = e.data.message;
       else if (e.reason) msg = e.reason;
       else msg = (e.message || '').substring(0, 100);
