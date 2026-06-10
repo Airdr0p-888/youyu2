@@ -1,7 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// ── Interfaces (inline, no external deps) ──
+/**
+ * @title TaxDistributor
+ * @dev 独立税费处理合约
+ *
+ *  职责：
+ *    - 接收主合约转来的税费代币
+ *    - swap 代币 → BNB
+ *    - 按四项分配：营销 / 销毁 / LP / 分红
+ *
+ *  四项分配（bps，总和 = 10000）：
+ *    marketingBps → 营销钱包
+ *    burnBps      → 销毁代币（直接发送到 0xdead）
+ *    lpBps        → 加流动性（一半 swap BNB + 一半代币）
+ *    dividendBps  → 分红合约
+ *
+ *  主合约在卖出时：
+ *    1. transfer 税费代币 → 本合约
+ *    2. 调用 tryProcess() 触发处理
+ *    → 失败不影响用户交易
+ */
+
+// ── Interfaces ──
 interface IERC20 {
     function balanceOf(address) external view returns (uint256);
     function transfer(address, uint256) external returns (bool);
@@ -12,19 +33,9 @@ interface IERC20 {
 interface IUniswapV2Router02 {
     function factory() external pure returns (address);
     function WETH() external pure returns (address);
-    /**
-     * @dev 标准 swap（不含 FOT 支持），用于无转账税的代币。
-     *      内部使用 _swap()，直接基于 reserves 计算，不调用 pair.balanceOf().sub(reserve)
-     *      因此避免了 ds-math-sub-underflow 等边界情况。
-     */
     function swapExactTokensForETH(
         uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline
     ) external returns (uint[] memory amounts);
-    /**
-     * @dev FOT 安全 swap（内部用 _swapSupportingFeeOnTransferTokens ，
-     *      会调用 pair.balanceOf().sub(reserve) 来计算实际接收量）。
-     *      仅当 TaxDistributor 有转账税时需要，否则用 swapExactTokensForETH 更稳定。
-     */
     function swapExactTokensForETHSupportingFeeOnTransferTokens(
         uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline
     ) external returns (uint[] memory amounts);
@@ -64,7 +75,6 @@ abstract contract Ownable {
 library SafeERC20 {
     bytes4 private constant SIG_TRANSFER   = bytes4(keccak256("transfer(address,uint256)"));
     bytes4 private constant SIG_APPROVE    = bytes4(keccak256("approve(address,uint256)"));
-    bytes4 private constant SIG_ALLOWANCE  = bytes4(keccak256("allowance(address,address)"));
 
     function safeTransfer(IERC20 token, address to, uint256 value) internal {
         (bool ok, bytes memory d) = address(token).call(
@@ -80,10 +90,6 @@ library SafeERC20 {
         require(ok && (d.length == 0 || abi.decode(d, (bool))), "SafeERC20: approve failed");
     }
 
-    /**
-     * @dev 安全设置授权额度，兼容 USDT 等"必须先置0再设新值"的代币。
-     *      策略：1) 先检查当前授权是否足够；2) 尝试直接设新值；3) 若失败，先置0再设新值。
-     */
     function safeIncreaseAllowance(IERC20 token, address spender, uint256 newAllowance) internal {
         uint256 current = token.allowance(address(this), spender);
         if (current >= newAllowance) return;
@@ -105,34 +111,24 @@ library SafeERC20 {
     }
 }
 
-/**
- * @title TaxDistributor
- * @dev 独立税费处理合约，负责：
- *   - 接收主合约转来的税费代币
- *   - swap 代币 → BNB
- *   - 分配 BNB 给营销钱包 / 分红合约
- *   - 可选：用部分代币+BNB 加流动性（LP 发给 owner）
- *
- * 主合约只负责交易和收税，把税费代币 transfer 给本合约，
- * 本合约异步处理，用户的交易永远不会因 swap 失败而 revert。
- */
 contract TaxDistributor is Ownable {
     using SafeERC20 for IERC20;
 
     // ── 配置 ──────────────────────────────────────
-    address public token;           // 主代币合约
+    address public token;              // 主代币合约
     address public marketingWallet;
     address public dividendTracker;
     IUniswapV2Router02 public router;
-    bool    public autoProcess = true;   // 是否允许任何人触发 processFees
+    bool    public autoProcess = true;
 
     // ── 阈值 ──────────────────────────────────────
-    uint256 public minProcessAmount = 1 * 1e18;  // 至少累积多少代币才处理
+    uint256 public minProcessAmount = 1 * 1e18;
 
-    // ── 分配比例（basis points, 10000 = 100%） ─
-    uint256 public marketingBps = 5000;  // 50% → 营销
-    uint256 public dividendBps  = 5000;  // 50% → 分红
-    uint256 public lpBps         = 0;     // 0%  → 不加 LP（可按需开启）
+    // ── 四项分配比例（bps, 总和 = 10000） ─
+    uint256 public marketingBps;      // 营销
+    uint256 public burnBps;           // 销毁（直接烧代币，不是烧 BNB！）
+    uint256 public lpBps;             // 回流底池
+    uint256 public dividendBps;       // 分红
     uint256 public constant MAX_BPS = 10000;
 
     // ── 调试 ──────────────────────────────
@@ -156,32 +152,40 @@ contract TaxDistributor is Ownable {
         address dividendTracker_,
         address router_,
         uint256 _marketingBps,
-        uint256 _dividendBps,
-        uint256 _lpBps
+        uint256 _burnBps,        // ★ 新增：销毁比例
+        uint256 _lpBps,
+        uint256 _dividendBps
     ) payable Ownable(address(0)) {
-        require(_marketingBps + _dividendBps + _lpBps <= MAX_BPS, "TaxDist: BPS overflow");
-        token           = token_;
-        marketingWallet = marketingWallet_;
-        dividendTracker = dividendTracker_;
-        router          = IUniswapV2Router02(router_);
+        require(_marketingBps + _burnBps + _dividendBps + _lpBps <= MAX_BPS, "TaxDist: BPS overflow");
+        require(_marketingBps + _burnBps + _dividendBps + _lpBps == MAX_BPS, "TaxDist: BPS must sum 100%");
+        token            = token_;
+        marketingWallet  = marketingWallet_;
+        dividendTracker  = dividendTracker_;
+        router           = IUniswapV2Router02(router_);
         marketingBps = _marketingBps;
+        burnBps      = _burnBps;
         dividendBps  = _dividendBps;
         lpBps        = _lpBps;
     }
 
-    // ── 接收 BNB（来自主合约 swap） ─────────────
-    // 新架构：主合约 swap 完直接发 BNB 过来，这里自动按比例分配。
+    // ── 接收 BNB（auto-distribute） ─────────────
+    // 当 swap 或其他来源发送 BNB 到本合约时，自动按比例分配。
     receive() external payable {
         uint256 amt = msg.value;
         if (amt == 0) return;
 
-        uint256 totalBps = marketingBps + dividendBps + lpBps;
+        uint256 totalBps = marketingBps + dividendBps + lpBps + burnBps;
         if (totalBps == 0) return;
 
-        // 按比例拆分
-        uint256 forDiv = (amt * dividendBps) / totalBps;
-        uint256 forMkt = (amt * marketingBps) / totalBps;
-        // lpBps 对应的 BNB 留在合约内（后续加 LP 用）
+        // 只拆分 marketing + dividend（BNB 分配），
+        // LP 的 BNB 留在合约内等 doProcess 处理
+        // burnBps 的 BNB 不相关（burn 是烧代币，不是烧 BNB）
+
+        uint256 nonLpBurnBps = marketingBps + dividendBps;
+        if (nonLpBurnBps == 0) return;
+
+        uint256 forDiv = (amt * dividendBps) / nonLpBurnBps;
+        uint256 forMkt = amt - forDiv;
 
         if (forDiv > 0 && dividendTracker != address(0)) {
             (bool ok,) = payable(dividendTracker).call{value: forDiv}("");
@@ -199,54 +203,38 @@ contract TaxDistributor is Ownable {
     }
 
     // ═══════════════════════════════════════════
-    // 核心：处理税费
+    //  核心：处理税费
     // ═══════════════════════════════════════════
 
-    /**
-     * @dev 任何人都可以调用（如果 autoProcess = true），
-     *      或仅 owner 调用。
-     *      把合约内累积的代币 swap 成 BNB 并分配。
-     */
     function processFees() external {
         if (inProcessing) return;
         if (!autoProcess && msg.sender != owner()) revert("Not authorized");
         doProcess();
     }
 
-    /**
-     * @dev owner 强制处理（忽略 autoProcess 开关）
-     */
     function forceProcess() external onlyOwner {
         doProcess();
     }
 
     /**
-     * @dev 安全触发 —— 永不 revert。
-     *      供主合约 _handleTax 自动调用，也供任何人手动触发。
-     *      如果 swap 失败，错误被静默吞掉，不会影响用户交易。
-     *
-     *      使用外部 self-call 来实现 try/catch（Solidity 不支持内部 try/catch）。
-     *      因为 doProcess() 现在是扁平的，外部调用开销可控。
+     * @dev 安全触发 —— 由主合约在 sell 时自动调用。
+     *      使用外部 self-call 实现 try/catch，不会 revert 用户交易。
      */
     function tryProcess() external {
         if (inProcessing) return;
-        // 使用底层 call 代替 try/catch，减少编译器生成的重入哨兵开销
         inProcessing = true;
         (bool ok, ) = address(this).call(abi.encodeWithSignature("doProcess()"));
-        ok; // 静默吞掉失败
+        ok;
         inProcessing = false;
     }
 
     /**
-     * @dev 核心处理逻辑 —— 扁平化设计，避免嵌套 try/catch 导致 viaIR 重入哨兵 gas 爆炸。
+     * @dev 核心处理逻辑
      *
      *      流程：
-     *      1. 检查余额是否超过阈值
-     *      2. 计算 swap 和 LP 配比
-     *      3. 授权 router
-     *      4. swap → BNB（内部函数，带 try/catch）
-     *      5. 按比例分配 BNB（纯数学，无外部调用风险）
-     *      6. 可选：加 LP
+     *      1. 烧毁 burnBps 比例的代币
+     *      2. LP 部分：一半 swap → BNB + 一半代币 → addLiquidityETH
+     *      3. 营销+分红部分：全部 swap → BNB → 分别发送
      */
     function doProcess() public lockProcessing {
         uint256 balance = IERC20(token).balanceOf(address(this));
@@ -257,96 +245,100 @@ contract TaxDistributor is Ownable {
 
         lastFailureReason = "";
 
-        // ── 计算各部分数量 ────────────────────────
-        uint256 lpTokenAmt   = (balance * lpBps) / MAX_BPS;
-        uint256 shareTokenAmt = balance - lpTokenAmt;
+        // ═══════════════════════════════════════
+        //  1. 销毁 burnBps 部分（直接烧代币）
+        // ═══════════════════════════════════════
+        uint256 burnAmount = (balance * burnBps) / MAX_BPS;
+        uint256 afterBurn = balance - burnAmount;
 
-        uint256 lpKeepToken = lpTokenAmt / 2;
-        uint256 lpSwapAmt   = lpTokenAmt - lpKeepToken;
+        if (burnAmount > 0) {
+            IERC20(token).safeTransfer(address(0xdead), burnAmount);
+        }
 
-        uint256 swapTotal = shareTokenAmt + lpSwapAmt;
-
-        if (swapTotal == 0) {
-            lastFailureReason = "LP amount too small to add liquidity";
+        if (afterBurn == 0) {
+            lastProcessTime = block.timestamp;
+            emit FeesProcessed(balance, 0, 0);
             return;
         }
 
-        // ── Approve router ──────────────────────
+        // ═══════════════════════════════════════
+        //  2. 非 burn 部分按比例拆分
+        // ═══════════════════════════════════════
+        uint256 nonBurnBps = MAX_BPS - burnBps;  // marketing + lp + dividend
+
+        // LP 部分：代币量
+        uint256 lpTokenAmt = (afterBurn * lpBps) / nonBurnBps;
+        uint256 nonLpTokenAmt = afterBurn - lpTokenAmt;
+
+        // LP：一半 swap 成 BNB，一半留着加 LP
+        uint256 lpSwapAmt  = lpTokenAmt / 2;
+        uint256 lpKeepAmt  = lpTokenAmt - lpSwapAmt;
+
+        // 总共需要 swap 的代币 = 营销+分红 全部 + LP的一半
+        uint256 swapTotal = nonLpTokenAmt + lpSwapAmt;
+
+        // ═══════════════════════════════════════
+        //  3. Swap 代币 → BNB
+        // ═══════════════════════════════════════
         IERC20(token).safeIncreaseAllowance(address(router), swapTotal);
 
-        // ── Swap → BNB（单独函数） ─────────────────
         uint256 bnbReceived = _swapTokensForBNB(swapTotal);
         if (bnbReceived == 0) {
-            // _swapTokensForBNB 内部已经设置了 lastFailureReason
             emit ProcessFailed(balance, lastFailureReason);
             return;
         }
 
         lastProcessTime = block.timestamp;
 
-        // ══════════════════════════════════════
-        // 分配 BNB（纯计算 + 简单转账，不易出错）
-        // ══════════════════════════════════════
+        // ═══════════════════════════════════════
+        //  4. 分配 BNB
+        // ═══════════════════════════════════════
 
-        // 按 swap 比例拆分 BNB
-        uint256 bnbFromLpSwap = (bnbReceived * lpSwapAmt) / swapTotal;
-        uint256 bnbFromShare   = bnbReceived - bnbFromLpSwap;
+        // LP swap 出的 BNB（按比例从总 BNB 中拆分）
+        uint256 bnbForLP = (bnbReceived * lpSwapAmt) / swapTotal;
+        uint256 bnbForNonLP = bnbReceived - bnbForLP;
 
-        // 分配营销+分红 BNB
-        uint256 nonLpBps = MAX_BPS - lpBps;
+        // 营销 + 分红 的 BNB
+        uint256 nonLpNonBurnBps = marketingBps + dividendBps;  // marketing + dividend (不含 lp 和 burn)
         uint256 bnbForMarketing = 0;
-        uint256 bnbForDividend  = 0;
+        uint256 bnbForDividend = 0;
 
-        if (nonLpBps > 0) {
-            bnbForMarketing = (bnbFromShare * marketingBps) / nonLpBps;
-            bnbForDividend  = bnbFromShare - bnbForMarketing;
+        if (nonLpNonBurnBps > 0 && bnbForNonLP > 0) {
+            bnbForDividend  = (bnbForNonLP * dividendBps) / nonLpNonBurnBps;
+            bnbForMarketing = bnbForNonLP - bnbForDividend;
         }
 
-        // 转账（发送失败不 revert）
+        // 发送 BNB
         if (bnbForMarketing > 0 && marketingWallet != address(0)) {
-            (bool ok, ) = payable(marketingWallet).call{value: bnbForMarketing}("");
+            (bool ok,) = payable(marketingWallet).call{value: bnbForMarketing}("");
             ok;
         }
         if (bnbForDividend > 0 && dividendTracker != address(0)) {
-            (bool ok, ) = payable(dividendTracker).call{value: bnbForDividend}("");
+            (bool ok,) = payable(dividendTracker).call{value: bnbForDividend}("");
             ok;
         }
 
-        // ── 加 LP ──────────────────────────
-        if (lpKeepToken > 0 && bnbFromLpSwap > 0) {
-            _addLiquiditySafe(lpKeepToken, bnbFromLpSwap);
+        // ═══════════════════════════════════════
+        //  5. 加 LP
+        // ═══════════════════════════════════════
+        if (lpKeepAmt > 0 && bnbForLP > 0) {
+            _addLiquiditySafe(lpKeepAmt, bnbForLP);
         }
 
         emit FeesProcessed(balance, bnbForMarketing, bnbForDividend);
     }
 
     /**
-     * @dev 执行 token → BNB swap，内部处理失败（不 throw）。
-     *
-     *      使用 swapExactTokensForETH（标准版），而非 FOT 版。
-     *
-     *      原因：
-     *      - TaxDistributor 已通过主合约 setTaxDistributor() 被排除税费
-     *        (isExcludedFromTax[taxDistributor] = true)
-     *      - 转账无额外扣费，不需要 FOT 版特殊处理
-     *      - FOT 版内部调用 _swapSupportingFeeOnTransferTokens，其
-     *        pair.balanceOf().sub(reserve) 在边界条件下会
-     *        ds-math-sub-underflow
-     *      - 单通道避免"第一个 swap 消耗代币后第二个 swap 失败"
-     *        导致的 BscScan execution reverted 混淆
-     *
-     * @param tokenAmount 要 swap 的代币数量
-     * @return bnbAmount swap 得到的 BNB 数量，失败返回 0
+     * @dev 执行 token → BNB swap，内部处理失败（不 throw）
      */
     function _swapTokensForBNB(uint256 tokenAmount) internal returns (uint256 bnbAmount) {
         try router.swapExactTokensForETH(
             tokenAmount,
-            0,               // amountOutMin = 0，接受任何输出
+            0,
             _getPath(),
             address(this),
             block.timestamp + 300
         ) returns (uint256[] memory amounts) {
-            // 用 Router 返回的 amounts 数组获取输出量（更可靠）
             bnbAmount = amounts[amounts.length - 1];
             if (bnbAmount == 0) {
                 lastFailureReason = "Swap output = 0";
@@ -391,7 +383,7 @@ contract TaxDistributor is Ownable {
     }
 
     // ═══════════════════════════════════════════
-    // Owner 配置
+    //  Owner 配置
     // ═══════════════════════════════════════════
 
     function setMarketingWallet(address _wallet) external onlyOwner {
@@ -414,11 +406,20 @@ contract TaxDistributor is Ownable {
         emit ConfigUpdated("token", 0);
     }
 
-    function setBps(uint256 _marketingBps, uint256 _dividendBps, uint256 _lpBps) external onlyOwner {
-        require(_marketingBps + _dividendBps + _lpBps <= MAX_BPS, "BPS overflow");
+    /**
+     * @dev 设置四项分配比例（bps，必须总和 = 10000）
+     */
+    function setBps(
+        uint256 _marketingBps,
+        uint256 _burnBps,
+        uint256 _lpBps,
+        uint256 _dividendBps
+    ) external onlyOwner {
+        require(_marketingBps + _burnBps + _dividendBps + _lpBps == MAX_BPS, "BPS must sum 100%");
         marketingBps = _marketingBps;
+        burnBps      = _burnBps;
+        lpBps        = _lpBps;
         dividendBps  = _dividendBps;
-        lpBps         = _lpBps;
     }
 
     function setMinProcessAmount(uint256 _amt) external onlyOwner {
@@ -430,12 +431,11 @@ contract TaxDistributor is Ownable {
     }
 
     // ═══════════════════════════════════════════
-    // 救援函数（防止代币卡死）
+    //  Emergency withdraw（测试期安全保障）
     // ═══════════════════════════════════════════
 
     /**
-     * @dev 提取任意 ERC20 代币（包括本币、LP 等）
-     *      防止代币意外转入后无法取出。
+     * @dev 提取任意 ERC20 代币（保留 pending fees）
      */
     function rescueToken(address _token, uint256 _amount) external onlyOwner {
         if (_token == token) {
@@ -452,8 +452,10 @@ contract TaxDistributor is Ownable {
      */
     function rescueBNB() external onlyOwner {
         uint256 bal = address(this).balance;
-        (bool ok, ) = payable(owner()).call{value: bal}("");
-        require(ok, "BNB transfer failed");
+        if (bal > 0) {
+            (bool ok,) = payable(owner()).call{value: bal}("");
+            require(ok, "BNB transfer failed");
+        }
     }
 
     /**
@@ -467,8 +469,8 @@ contract TaxDistributor is Ownable {
      * @dev 强制撤除 LP
      */
     function emergencyRemoveLP(address _pair, uint256 _amount) external onlyOwner {
-        IERC20(_pair).safeApprove(router.factory(), _amount);
-        (bool ok, ) = address(router).call(
+        IERC20(_pair).safeApprove(address(router.factory()), _amount);
+        (bool ok,) = address(router).call(
             abi.encodeWithSignature(
                 "removeLiquidityETHSupportingFeeOnTransferTokens(address,uint256,uint256,uint256,address,uint256)",
                 token, _amount, 0, 0, owner(), block.timestamp
@@ -485,6 +487,7 @@ contract TaxDistributor is Ownable {
         uint256 balance_,
         uint256 minProcessAmount_,
         uint256 marketingBps_,
+        uint256 burnBps_,
         uint256 dividendBps_,
         uint256 lpBps_,
         string memory lastFailure_,
@@ -496,6 +499,7 @@ contract TaxDistributor is Ownable {
             IERC20(token).balanceOf(address(this)),
             minProcessAmount,
             marketingBps,
+            burnBps,
             dividendBps,
             lpBps,
             lastFailureReason,

@@ -4,15 +4,15 @@ pragma solidity ^0.8.4;
 // ═══════════════════════════════════════════════════════════════
 //  ModaMintToken — 仿 USHIT 架构
 //
-//  核心设计（和 USHIT 一致）：
-//  1. 税费代币留在主合约内累积
-//  2. 卖出时把合约内累积的代币 swap 成 BNB
-//  3. BNB 直达 TaxDistributor（由 receive() 自动按比例分配）
+//  核心设计：
+//  1. 主合约：只负责 mint 预售 / 交易税费限制 / 收税
+//  2. 所有税费代币转给 TaxDistributor（独立合约）
+//  3. TaxDistributor 负责 swap → BNB → 按四项分配
 //
 //  和 USHIT 的区别：
-//  - 不内部分发 BNB（fund/平台/分红），全部发给 TaxDistributor
-//  - 使用 ModaDividendTracker（BNB 原生分红，不需要 USDT 中转）
-//  - 保留 mint 预售发射逻辑
+//  - 不内部分发 BNB，全部交给 TaxDistributor
+//  - 使用 ModaDividendTracker（BNB 原生分红）
+//  - TaxDistributor 独立部署，含四项分配（营销/销毁/LP/分红）
 // ═══════════════════════════════════════════════════════════════
 
 interface IERC20 {
@@ -52,6 +52,11 @@ interface ISwapPair {
     function totalSupply() external view returns (uint256);
 }
 
+// ── TaxDistributor 接口（主合约只需 forward + tryProcess） ──
+interface ITaxDistributor {
+    function tryProcess() external;
+}
+
 // ── Libraries ────────────────────────────────────────────
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) { uint256 c = a + b; require(c >= a, "SafeMath: addition overflow"); return c; }
@@ -60,8 +65,6 @@ library SafeMath {
     function mul(uint256 a, uint256 b) internal pure returns (uint256) { if (a == 0) return 0; uint256 c = a * b; require(c / a == b, "SafeMath: multiplication overflow"); return c; }
     function div(uint256 a, uint256 b) internal pure returns (uint256) { return div(a, b, "SafeMath: division by zero"); }
     function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) { require(b > 0, errorMessage); return a / b; }
-    function mod(uint256 a, uint256 b) internal pure returns (uint256) { return mod(a, b, "SafeMath: modulo by zero"); }
-    function mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) { require(b != 0, errorMessage); return a % b; }
 }
 
 library SafeMathInt {
@@ -149,7 +152,7 @@ abstract contract Ownable {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  DividendPayingToken (abstract, USHIT-style)
+//  DividendPayingToken (abstract)
 // ═══════════════════════════════════════════════════════════════
 abstract contract DividendPayingToken is Ownable {
     using SafeMath for uint256;
@@ -167,7 +170,6 @@ abstract contract DividendPayingToken is Ownable {
 
     constructor() Ownable(msg.sender) {}
 
-    // receive() 自动处理 BNB 分红（不需要 onlyOwner）
     receive() external payable {
         uint256 supply = totalSupply();
         if (supply > 0 && msg.value > 0) {
@@ -223,8 +225,7 @@ abstract contract DividendPayingToken is Ownable {
     function _setBalanceBase(address account, uint256 newBalance) internal {
         uint256 currentBalance = balanceOf(account);
         if (newBalance > currentBalance) {
-            uint256 mintAmount = newBalance.sub(currentBalance);
-            _mintInternal(account, mintAmount);
+            _mintInternal(account, newBalance.sub(currentBalance));
         } else if (newBalance < currentBalance) {
             _burnInternal(account, currentBalance.sub(newBalance));
         }
@@ -237,8 +238,7 @@ abstract contract DividendPayingToken is Ownable {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  ModaDividendTracker — USHIT-style ETHBackDividendTracker
-//  分红使用 BNB（原生），不需要 USDT 中转
+//  ModaDividendTracker — BNB 原生分红
 // ═══════════════════════════════════════════════════════════════
 contract ModaDividendTracker is DividendPayingToken {
     using SafeMath for uint256;
@@ -317,7 +317,6 @@ contract ModaDividendTracker is DividendPayingToken {
                 totalTrackedSupply = totalTrackedSupply.add(newBalance);
             }
 
-            // 修正：保留历史 correction
             magnifiedDividendCorrections[account] =
                 oldCorrection
                 .add(int256(magnifiedDividendPerShare.mul(oldBalance) / MAGNITUDE))
@@ -414,6 +413,9 @@ contract ModaDividendTracker is DividendPayingToken {
         return (addrs, balances);
     }
 
+    // ═══════════════════════════════════════════════════════
+    //  Emergency withdraw（测试期安全保障）
+    // ═══════════════════════════════════════════════════════
     function emergencyWithdrawBNB() external onlyOwner {
         uint256 bal = address(this).balance;
         if (bal > 0) {
@@ -427,13 +429,17 @@ contract ModaDividendTracker is DividendPayingToken {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  ModaMintToken — 主合约（仿 USHIT 架构）
+//  ModaMintToken — 主合约
 //
-//  和 USHIT 一样的核心循环：
-//    1. 税费代币留在主合约内
-//    2. _transfer 检测到 sell 方向时触发 swap
-//    3. swap 后的 BNB 直达 TaxDistributor
-//    4. TaxDistributor.receive() 自动按比例分配
+//  职责：
+//    • Mint 预售（公平发射，白名单可选）
+//    • 交易税费限制（buy/sell tax bps）
+//    • 收税并转发给 TaxDistributor（独立合约处理分配）
+//    • 交易控制 / 加池撤池检测
+//
+//  不负责：
+//    ✗ 税费分配（营销 / 销毁 / LP / 分红）→ TaxDistributor
+//    ✗ 代币 swap → BNB                  → TaxDistributor
 // ═══════════════════════════════════════════════════════════════
 contract ModaMintToken is IERC20, Ownable {
     using SafeMath for uint256;
@@ -448,7 +454,7 @@ contract ModaMintToken is IERC20, Ownable {
 
     // ── DEX ──
     ISwapRouter public _swapRouter;
-    address public currency;                       // WBNB
+    address public currency;                         // WBNB
     address public _mainPair;
     mapping(address => bool) public _swapPairList;
 
@@ -456,21 +462,20 @@ contract ModaMintToken is IERC20, Ownable {
     bool private inSwap;
     modifier lockTheSwap() { inSwap = true; _; inSwap = false; }
 
-    // ── 税费 ──
-    uint256 public buyTaxBps;           // 买入总税率（bps）
-    uint256 public sellTaxBps;          // 卖出总税率（bps）
-    uint256 public burnBps;             // 税费中烧毁比例（10000 = 100%）
-    uint256 public constant MAX_TAX = 2500;  // 最高 25%
+    // ── 税费（仅税率限额，不包含分配逻辑） ──
+    uint256 public buyTaxBps;                        // 买入总税率（bps）
+    uint256 public sellTaxBps;                       // 卖出总税率（bps）
+    uint256 public constant MAX_TAX = 2500;          // 最高 25%
 
-    // ── 税费分配钱包 ──
-    // swap 后的 BNB 直接发到这个地址（TaxDistributor 合约）
-    // TaxDistributor.receive() 自动按 marketingBps/dividendBps 分配
+    // ── 税费分配合约 ──
+    // 所有税费代币转发到此地址，由 TaxDistributor 独立处理
+    // swap → BNB → 按四项分配（营销/销毁/LP/分红）
     address public taxDistributorWallet;
 
-    // ── 排除列表 ──
+    // ── 排除列表（不收税） ──
     mapping(address => bool) public isExcludedFromTax;
 
-    // ── 分红 ──
+    // ── 分红追踪器（合约内自动部署） ──
     ModaDividendTracker public dividendTracker;
 
     // ── 交易状态 ──
@@ -499,38 +504,31 @@ contract ModaMintToken is IERC20, Ownable {
     event AddLiquidityFailed(uint256 bnbAmount, string reason);
     event DividendTrackerUpdated(address indexed oldTracker, address indexed newTracker);
     event TaxDistributorWalletSet(address indexed wallet);
-    event SwapFailed(uint256 tokenAmount, string reason);
+    event TaxForwarded(uint256 tokenAmount, address to);
 
     // ═══════════════════════════════════════════════════════════
     //  Constructor
     //
-    //  参数和原来完全一致，内部按 USHIT 模式初始化
+    //  11 个参数（去掉了分配相关的 5 个）
     // ═══════════════════════════════════════════════════════════
     constructor(
-        string memory name_,
-        string memory symbol_,
-        uint256 totalSupply_,
-        uint256 mintCostBNB_,
-        uint256 fillBNB_,
-        uint256 buyTax_,
-        uint256 sellTax_,
-        uint256 marketingPct_,   // ⚠ 传给 TaxDistributor 用的，主合约不存储
-        uint256 burnPct_,
-        uint256 dividendPct_,    // ⚠ 传给 TaxDistributor 用的
-        uint256 liquidityPct_,   // ⚠ 传给 TaxDistributor 用的
-        address marketingWallet_,
-        uint256 minHoldForDividend_,
-        uint256 presaleTokenPct_,
-        bool    whitelistMintOnly_,
-        uint256 lpTokenPct_
+        string memory name_,          // 1
+        string memory symbol_,        // 2
+        uint256 totalSupply_,         // 3
+        uint256 mintCostBNB_,         // 4
+        uint256 fillBNB_,             // 5
+        uint256 buyTax_,              // 6
+        uint256 sellTax_,             // 7
+        uint256 minHoldForDividend_,  // 8
+        uint256 presaleTokenPct_,     // 9
+        bool    whitelistMintOnly_,   // 10
+        uint256 lpTokenPct_           // 11
     ) payable Ownable(address(0)) {
         require(buyTax_ <= MAX_TAX, "Buy tax too high");
         require(sellTax_ <= MAX_TAX, "Sell tax too high");
-        require(marketingPct_ + burnPct_ + dividendPct_ + liquidityPct_ <= 10000, "Tax alloc > 100%");
         require(fillBNB_ > 0, "Fill must > 0");
         require(mintCostBNB_ > 0, "Mint cost > 0");
         require(fillBNB_ >= mintCostBNB_, "Fill < mint cost");
-        require(marketingWallet_ != address(0), "Wallet zero");
         require(presaleTokenPct_ >= 1 && presaleTokenPct_ <= 99, "Presale pct 1-99");
         require(lpTokenPct_ <= 100, "LP pct > 100");
 
@@ -554,7 +552,6 @@ contract ModaMintToken is IERC20, Ownable {
         // ── 税费 ──
         buyTaxBps = buyTax_;
         sellTaxBps = sellTax_;
-        burnBps = burnPct_;
 
         // ── 排除列表 ──
         isExcludedFromTax[address(this)] = true;
@@ -574,7 +571,7 @@ contract ModaMintToken is IERC20, Ownable {
         tokensPerLP = tokensPerMint.mul(lpTokenPct_) / 100;
         presaleTokenPct = presaleTokenPct_;
 
-        // ── 分红追踪器（在合约内自动部署，和 USHIT 一样） ──
+        // ── 分红追踪器 ──
         uint256 mushHoldNum = _tTotal / 2100;
         dividendTracker = new ModaDividendTracker(mushHoldNum, address(this));
 
@@ -630,7 +627,6 @@ contract ModaMintToken is IERC20, Ownable {
 
     // ═══════════════════════════════════════════════════════════
     //  _isAddLiquidity / _isRemoveLiquidity（USHIT 同款）
-    //  用于检测加池/撤池，避免错误地收税或触发 swap
     // ═══════════════════════════════════════════════════════════
     function _isAddLiquidity() internal view returns (bool isAdd) {
         ISwapPair mainPair = ISwapPair(_mainPair);
@@ -659,10 +655,9 @@ contract ModaMintToken is IERC20, Ownable {
     //
     //  流程：
     //   1. 检测加池/撤池
-    //   2. 如果是 sell 方向（_swapPairList[to]）→ 触发 swap
-    //   3. 收取税费 + 烧毁
-    //   4. 更新分红追踪
-    //   5. 自动 process 分红
+    //   2. sell 方向 → 转发税费代币给 TaxDistributor 并触发处理
+    //   3. 收税（买入/卖出）
+    //   4. 更新分红追踪 + auto process
     // ═══════════════════════════════════════════════════════════
     function _transfer(address from, address to, uint256 amount) private {
         uint256 balance = balanceOf(from);
@@ -691,17 +686,13 @@ contract ModaMintToken is IERC20, Ownable {
                 require(isExcluded, "Trading not active");
             }
 
-            // ★ 卖出时触发 swap（和 USHIT 一样的时机）★
+            // ★ 卖出时转发税费代币给 TaxDistributor ★
+            //     只在 sell（_swapPairList[to]）触发，避免 Pair.LOCKED 重入
             if (_swapPairList[to]) {
-                if (!inSwap && !isAdd) {
+                if (!inSwap && !isAdd && taxDistributorWallet != address(0)) {
                     uint256 contractTokenBalance = balanceOf(address(this));
                     if (contractTokenBalance > 0) {
-                        // 限制单次 swap 量，防止 gas 过高
-                        uint256 numTokensSellToFund = amount;
-                        if (numTokensSellToFund > contractTokenBalance) {
-                            numTokensSellToFund = contractTokenBalance;
-                        }
-                        _swapTaxForDistributor(numTokensSellToFund);
+                        _forwardTaxToDistributor(contractTokenBalance);
                     }
                 }
             }
@@ -711,7 +702,7 @@ contract ModaMintToken is IERC20, Ownable {
             if (_swapPairList[to]) { isSell = true; }
         }
 
-        // ── 执行转账（收税 + 烧毁） ──
+        // ── 执行转账（收税） ──
         _tokenTransfer(from, to, amount, takeFee, isSell);
 
         // ── 更新分红追踪 ──
@@ -730,10 +721,10 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  _tokenTransfer — 分离税费和烧毁
+    //  _tokenTransfer — 收税（所有税费 → 合约内）
     //
-    //  USHIT-style：税费进合约、烧毁进 dead，rest 给接收方。
-    //  burnBps 是占税费的百分比（不是交易量的百分比）。
+    //  只收税不销毁！销毁由 TaxDistributor 按其 burnBps 处理。
+    //  税费全部进 address(this)，sell 时会转发给 TaxDistributor。
     // ═══════════════════════════════════════════════════════════
     function _tokenTransfer(
         address sender, address recipient, uint256 tAmount, bool takeFee, bool isSell
@@ -746,18 +737,9 @@ contract ModaMintToken is IERC20, Ownable {
             uint256 taxAmount = tAmount.mul(taxBps) / 10000;
 
             if (taxAmount > 0) {
-                // 烧毁部分（burnBps 是税费分配中的比例）
-                uint256 burnAmount = taxAmount.mul(burnBps) / 10000;
-                if (burnAmount > 0) {
-                    feeAmount = feeAmount.add(burnAmount);
-                    _takeTransfer(sender, address(0xdead), burnAmount);
-                }
-                // 其余税费留在合约内
-                uint256 contractAmt = taxAmount.sub(burnAmount);
-                if (contractAmt > 0) {
-                    feeAmount = feeAmount.add(contractAmt);
-                    _takeTransfer(sender, address(this), contractAmt);
-                }
+                feeAmount = taxAmount;
+                // ★ 所有税费都进主合约，sell 时统一转发给 TaxDistributor
+                _takeTransfer(sender, address(this), taxAmount);
             }
         }
 
@@ -770,56 +752,48 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  _swapTaxForDistributor
+    //  _forwardTaxToDistributor — 转发税费代币 + 触发处理
     //
-    //  和 USHIT 的 swapTokenForFund 一样的定位，但逻辑更简单：
-    //    - 合约内累积的代币 → BNB → 直接发到 TaxDistributor
-    //    - 不需要 TokenDistributor 中转
-    //    - 不需要内部分配（fund/平台/分红）
-    //    - TaxDistributor.receive() 自动拆给 marketing + dividend
+    //  1. 把合约内所有代币转给 TaxDistributor
+    //  2. 调用 TaxDistributor.tryProcess()（安全兜底，失败不 revert）
+    //
+    //  TaxDistributor 的 doProcess() 会：
+    //    → 按 burnBps 销毁代币
+    //    → swap 剩余 → BNB
+    //    → 按 marketingBps/dividendBps 转账 BNB
+    //    → 按 lpBps 加流动性
     // ═══════════════════════════════════════════════════════════
-    event FailedSwapExactTokensForETH();
-
-    function _swapTaxForDistributor(uint256 tokenAmount) private lockTheSwap {
+    function _forwardTaxToDistributor(uint256 tokenAmount) private lockTheSwap {
         if (tokenAmount == 0) return;
         if (taxDistributorWallet == address(0)) return;
-        if (_balances[address(this)] < tokenAmount) return;
 
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = currency;
+        // 1. 转发代币
+        _basicTransfer(address(this), taxDistributorWallet, tokenAmount);
 
-        // 确保 Router 有足够授权
-        _approve(address(this), address(_swapRouter), tokenAmount);
+        emit TaxForwarded(tokenAmount, taxDistributorWallet);
 
-        try _swapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            tokenAmount,
-            0,                         // amountOutMin = 0，接受任何输出
-            path,
-            taxDistributorWallet,      // ★ BNB 直达分配合约
-            block.timestamp
-        ) {
-            // BNB 已直达 taxDistributorWallet
-            // TaxDistributor.receive() 自动按比例分配
+        // 2. 触发 TaxDistributor 处理（安全调用，失败不影响交易）
+        try ITaxDistributor(taxDistributorWallet).tryProcess() {
+            // BNB 分配由 TaxDistributor.receive() 自动处理
         } catch {
-            emit FailedSwapExactTokensForETH();
+            // 静默失败 — TaxDistributor 后续可由任何人手动触发 processFees()
         }
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  手动触发 swap（Owner 兜底）
+    //  Owner 手动兜底：强制转发税费（当自动触发失败时）
     // ═══════════════════════════════════════════════════════════
-    function forceSwapTax() external onlyOwner lockTheSwap {
+    function forceForwardTax() external onlyOwner lockTheSwap {
         require(taxDistributorWallet != address(0), "Distributor wallet not set");
         uint256 tokenBal = balanceOf(address(this));
         if (tokenBal > 0) {
-            _swapTaxForDistributor(tokenBal);
+            _forwardTaxToDistributor(tokenBal);
         }
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  设置税费分配钱包
-    //  发射时 launch.html 自动调用，不需要手动操作
+    //  设置税费分配合约地址
+    //  发射时 launch.html 第三步自动调用
     // ═══════════════════════════════════════════════════════════
     function setTaxDistributorWallet(address _wallet) external onlyOwner {
         require(_wallet != address(0), "Zero address");
@@ -829,7 +803,7 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  receive() — Mint 预售（USHIT 也是用 receive 做 mint）
+    //  receive() — Mint 预售
     // ═══════════════════════════════════════════════════════════
     receive() external payable {
         if (presaleActive && msg.value == mintCostBNB && !inSwap) {
@@ -855,15 +829,12 @@ contract ModaMintToken is IERC20, Ownable {
         emit Transfer(address(this), msg.sender, tokenAmt);
         emit Mint(msg.sender, msg.value, tokenAmt);
 
-        // 更新分红追踪
         try dividendTracker.setBalance(payable(msg.sender), balanceOf(msg.sender)) {} catch {}
 
-        // 加 LP
         if (tokensPerLP > 0) {
             _addMintLiquidity(msg.value);
         }
 
-        // 预售完成 → 自动开盘
         if (totalBNBCollected >= fillAmountBNB) {
             presaleActive = false;
             tradingActive = true;
@@ -891,7 +862,6 @@ contract ModaMintToken is IERC20, Ownable {
     // ═══════════════════════════════════════════════════════════
     function setBuyTax(uint256 bps) external onlyOwner { require(bps <= MAX_TAX); buyTaxBps = bps; }
     function setSellTax(uint256 bps) external onlyOwner { require(bps <= MAX_TAX); sellTaxBps = bps; }
-    function setBurnBps(uint256 bps) external onlyOwner { burnBps = bps; }
     function excludeFromTax(address a, bool ex) external onlyOwner { isExcludedFromTax[a] = ex; }
 
     function enableTrading() external onlyOwner {
@@ -939,12 +909,15 @@ contract ModaMintToken is IERC20, Ownable {
         );
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  Emergency withdraw（测试期安全保障，防止意外锁死）
+    // ═══════════════════════════════════════════════════════════
     function withdrawBNB() external onlyOwner {
         payable(owner()).transfer(address(this).balance);
     }
 
-    function emergencyWithdrawToken(address token, uint256 amount) external onlyOwner {
-        IERC20(token).transfer(owner(), amount);
+    function emergencyWithdrawToken(address _token, uint256 _amount) external onlyOwner {
+        IERC20(_token).transfer(owner(), _amount);
     }
 
     // ── 分红管理 ──
