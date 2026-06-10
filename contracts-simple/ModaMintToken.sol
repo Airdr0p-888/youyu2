@@ -424,6 +424,7 @@ contract ModaMintToken is IERC20, Ownable {
     uint256 public dividendSwapThreshold = 10 * 1e18;
     uint256 public pendingLiquidityTokens;
     uint256 public pendingSwapForDividend;
+    bool public autoSwapEnabled = true;
     bool private inSwap;
     modifier lockTheSwap() { inSwap = true; _; inSwap = false; }
 
@@ -559,8 +560,8 @@ contract ModaMintToken is IERC20, Ownable {
             require(isExcludedFromTax[from] || isExcludedFromTax[to], "Trading not active");
         }
 
-        bool isBuy  = (from == uniswapV2Pair);
-        bool isSell = (to == uniswapV2Pair);
+        bool isBuy  = (from == uniswapV2Pair && to != address(uniswapV2Router));
+        bool isSell = (to == uniswapV2Pair && from != address(uniswapV2Router));
         uint256 taxAmount = 0;
 
         if (!isExcludedFromTax[from] && !isExcludedFromTax[to]) {
@@ -625,11 +626,11 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     // ── Swap ──
-    uint256 public minSwapAmount = 1 * 1e18;  // 至少 1 token 才自动 swap，owner 可调整
+    uint256 public minSwapAmount = 10 * 1e18;  // 至少 10 token 才自动 swap，owner 可调整
 
     // 只在 _transfer 判断是 Sell 后调用，避免买入时也触发 swap
     function _tryAutoSwap() internal {
-        if (inSwap) return;
+        if (inSwap || !autoSwapEnabled) return;
         uint256 swapTotal = pendingSwapForDividend + pendingMarketingTokens;
         if (swapTotal < minSwapAmount) return;
         _processSwap();
@@ -713,6 +714,16 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     // ── Mint ──
+    // ── 前端兼容别名（mint.html 使用的旧函数名）──
+    function mintPrice()      external view returns (uint256) { return mintCostBNB; }
+    function hardCap()        external view returns (uint256) { return fillAmountBNB; }
+    function totalMinted()    external view returns (uint256) { return totalBNBCollected; }
+    function tradingEnabled() external view returns (bool)   { return tradingActive; }
+    function openMode()       external pure returns (uint8)   { return 0; }
+    function whitelistOnly()  external view returns (bool)   { return whitelistMintOnly; }
+    function hasMinted(address user) external view returns (bool) { return mintedAmount[user] > 0; }
+    function mintBatchSize()  external view returns (uint256) { return mintCostBNB; }
+
     function setMintPrice(uint256 costBNB_, uint256 fillBNB_) external onlyOwner {
         require(costBNB_ > 0 && fillBNB_ >= costBNB_, "Invalid params");
         mintCostBNB = costBNB_;
@@ -791,6 +802,7 @@ contract ModaMintToken is IERC20, Ownable {
 
     function setDividendSwapThreshold(uint256 amt) external onlyOwner { dividendSwapThreshold = amt; }
     function setMinSwapAmount(uint256 amt) external onlyOwner { minSwapAmount = amt; }
+    function setAutoSwapEnabled(bool enabled) external onlyOwner { autoSwapEnabled = enabled; }
     function setMinHoldForDividend(uint256 amt) external onlyOwner {
         dividendTracker.setMinimumTokenBalanceForDividends(amt);
     }
