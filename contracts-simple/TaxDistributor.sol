@@ -297,15 +297,18 @@ contract TaxDistributor is Ownable {
     /**
      * @dev 执行 token → BNB swap，内部处理失败（不 throw）。
      *
-     *      使用 swapExactTokensForETH（标准版），而非
-     *      swapExactTokensForETHSupportingFeeOnTransferTokens（FOT版）。
-     *
-     *      原因：FOT 版内部调用 _swapSupportingFeeOnTransferTokens，
-     *      它会执行 pair.balanceOf().sub(reserve) 来计算实际接收量，
-     *      这在高税率代币或某些边界情况下会产生 ds-math-sub-underflow。
-     *
-     *      由于 TaxDistributor 已被主合约排除税费（isExcludedFromTax），
-     *      代币转账没有额外扣费，使用标准版 swap 即可，且避免了上述问题。
+     *      双通道兜底策略：
+     *      ┌──────────────────────────────────────────┐
+     *      │ 1. 先试 swapExactTokensForETHSupporting-  │
+     *      │    FeeOnTransferTokens (FOT 版)          │
+     *      │    → PancakeSwap BSC 核心函数，兼容性最佳  │
+     *      │                                          │
+     *      │ 2. 如果 FOT 版失败，fallback 到           │
+     *      │    swapExactTokensForETH (标准版)         │
+     *      │    → 回避 .sub(reserve) underflow 问题    │
+     *      │                                          │
+     *      │ 两个都失败 → lastFailureReason 记录原因    │
+     *      └──────────────────────────────────────────┘
      *
      * @param tokenAmount 要 swap 的代币数量
      * @return bnbAmount swap 得到的 BNB 数量，失败返回 0
@@ -313,21 +316,43 @@ contract TaxDistributor is Ownable {
     function _swapTokensForBNB(uint256 tokenAmount) internal returns (uint256 bnbAmount) {
         uint256 bnbBefore = address(this).balance;
 
+        // ═══ 通道 1：FOT 版（首选，PancakeSwap BSC 原生支持）═══
+        try router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            1,               // amountOutMin = 1 wei
+            _getPath(),
+            address(this),
+            block.timestamp + 300
+        ) {
+            bnbAmount = address(this).balance - bnbBefore;
+            if (bnbAmount > 0) return bnbAmount;
+            // bnbAmount == 0，不记录失败，让标准版有机会
+            emit Debug("FOT swap=0,trying std", tokenAmount, 0);
+        } catch Error(string memory /*reason*/) {
+            // FOT 版失败（如 ds-math-sub-underflow），
+            // 不记录为最终失败，尝试标准版兜底
+            emit Debug("FOT failed,trying std", tokenAmount, 0);
+        } catch {
+            emit Debug("FOT unknown,trying std", tokenAmount, 0);
+        }
+
+        // ═══ 通道 2：标准版（兜底）═══
         try router.swapExactTokensForETH(
             tokenAmount,
-            1,               // amountOutMin = 1 wei，接受任何输出
+            1,
             _getPath(),
             address(this),
             block.timestamp + 300
         ) {
             bnbAmount = address(this).balance - bnbBefore;
             if (bnbAmount == 0) {
-                lastFailureReason = "Swap output = 0";
+                lastFailureReason = "Both swaps: output = 0";
             }
+            return bnbAmount;
         } catch Error(string memory reason) {
             lastFailureReason = reason;
         } catch {
-            lastFailureReason = "Swap failed (unknown)";
+            lastFailureReason = "Both swaps failed";
         }
     }
 
