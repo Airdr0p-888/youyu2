@@ -263,9 +263,14 @@ contract DividendDistributor {
         return holders.length;
     }
 
-    // ── 接收 BNB（Token 合约直接打 BNB 到这里） ──
+    // ── 接收 BNB 时自动分红 ──
+    //      TaxDistributor 用 call{value: ...}("") 打 BNB 进来
+    //      → 自动累加 accDividendPerShare → 轮训分发（每人一次最多4个）
     receive() external payable {
-        // 如果来自 Token 合约，不自动分配（由 Token 调用 distributeBNB）
-        // 如果是其他地址打 BNB，也不自动分配（需要调用 distributeBNB）
+        if (totalShares > 0 && msg.value > 0) {
+            accDividendPerShare += (msg.value * 1e18) / totalShares;
+            emit DividendDistributed(address(0), msg.value);
+            _distributeBatch();
+        }
     }
 }
