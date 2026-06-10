@@ -518,7 +518,6 @@ contract ModaMintToken is IERC20, Ownable {
     }
 
     function approve(address spender, uint256 amount) public override returns (bool) {
-        _tryAutoSwap();
         _approve(msg.sender, spender, amount);
         return true;
     }
@@ -555,15 +554,13 @@ contract ModaMintToken is IERC20, Ownable {
         require(amount > 0, "Amount zero");
         require(_balances[from] >= amount, "Insufficient balance");
 
-        if (!inSwap) _tryAutoSwap();
-
         bool isDexTransfer = (from == uniswapV2Pair || to == uniswapV2Pair);
         if (isDexTransfer && !tradingActive) {
             require(isExcludedFromTax[from] || isExcludedFromTax[to], "Trading not active");
         }
 
-        bool isBuy  = (from == uniswapV2Pair && to != address(uniswapV2Router));
-        bool isSell = (to == uniswapV2Pair && from != address(uniswapV2Router));
+        bool isBuy  = (from == uniswapV2Pair);
+        bool isSell = (to == uniswapV2Pair);
         uint256 taxAmount = 0;
 
         if (!isExcludedFromTax[from] && !isExcludedFromTax[to]) {
@@ -649,13 +646,11 @@ contract ModaMintToken is IERC20, Ownable {
     function _processSwap() internal lockTheSwap {
         uint256 divAmt = pendingSwapForDividend;
         uint256 mktAmt = pendingMarketingTokens;
-        uint256 liqAmt = pendingLiquidityTokens;
         uint256 swapAmt = divAmt + mktAmt;
         if (swapAmt == 0) return;
 
         pendingSwapForDividend = 0;
         pendingMarketingTokens = 0;
-        // pendingLiquidityTokens 不清零，等 addLiquidity() 时再消耗
 
         uint256 bnbBefore = address(this).balance;
 
@@ -664,45 +659,51 @@ contract ModaMintToken is IERC20, Ownable {
         try uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             swapAmt, 0, _getPath(), address(this), block.timestamp
         ) {
-            // swap 成功
+            uint256 bnbReceived = address(this).balance - bnbBefore;
+
+            if (mktAmt > 0 && bnbReceived > 0 && marketingWallet != address(0)) {
+                uint256 mktBNB = (bnbReceived * mktAmt) / swapAmt;
+                (bool ok1, ) = marketingWallet.call{value: mktBNB}("");
+                if (!ok1) pendingMarketingTokens = mktAmt;
+            }
+
+            if (divAmt > 0 && bnbReceived > 0) {
+                uint256 divBNB = (bnbReceived * divAmt) / swapAmt;
+                (bool ok2, ) = address(dividendTracker).call{value: divBNB}("");
+                if (ok2) {
+                    emit DividendProcessed(swapAmt, divBNB);
+                } else {
+                    pendingSwapForDividend = divAmt;
+                }
+            }
+
+            // Liquidity 单独处理，不混在 swap 里
+            if (pendingLiquidityTokens > 0) {
+                _tryAddLiquidity();
+            }
         } catch {
             pendingSwapForDividend = divAmt;
             pendingMarketingTokens = mktAmt;
             emit DividendSwapFailed(swapAmt);
-            return;
         }
+    }
 
-        uint256 bnbReceived = address(this).balance - bnbBefore;
+    // 单独添加流动性：用合约里剩余的 BNB + 累积的 LP 代币加底池
+    function _tryAddLiquidity() internal {
+        uint256 tokenAmt = pendingLiquidityTokens;
+        uint256 bnbAmt = address(this).balance;
+        // 至少 0.01 BNB 才加，避免 dust LP 和意外耗尽合约 BNB
+        if (tokenAmt == 0 || bnbAmt < 0.01 ether) return;
 
-        if (mktAmt > 0 && bnbReceived > 0 && marketingWallet != address(0)) {
-            uint256 mktBNB = (bnbReceived * mktAmt) / swapAmt;
-            (bool ok1, ) = marketingWallet.call{value: mktBNB}("");
-            if (!ok1) pendingMarketingTokens = mktAmt;
-        }
+        _approve(address(this), address(uniswapV2Router), tokenAmt);
 
-        if (divAmt > 0 && bnbReceived > 0) {
-            uint256 divBNB = (bnbReceived * divAmt) / swapAmt;
-            (bool ok2, ) = address(dividendTracker).call{value: divBNB}("");
-            if (ok2) {
-                emit DividendProcessed(swapAmt, divBNB);
-            } else {
-                pendingSwapForDividend = divAmt;
-            }
-        }
-
-        uint256 bnbForLP = 0;
-        if (liqAmt > 0 && bnbReceived > 0) {
-            bnbForLP = (bnbReceived * liqAmt) / swapAmt;
-        }
-        if (liqAmt > 0 && bnbForLP > 0) {
-            _approve(address(this), address(uniswapV2Router), liqAmt);
-            try uniswapV2Router.addLiquidityETH{value: bnbForLP}(
-                address(this), liqAmt, 0, 0, address(this), block.timestamp
-            ) {
-                emit InitialLiquidityAdded(liqAmt, bnbForLP);
-            } catch {
-                pendingLiquidityTokens = liqAmt;
-            }
+        try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
+            address(this), tokenAmt, 0, 0, owner(), block.timestamp
+        ) {
+            pendingLiquidityTokens = 0;
+            emit InitialLiquidityAdded(tokenAmt, bnbAmt);
+        } catch {
+            // 失败不清零，下次再试
         }
     }
 
@@ -760,7 +761,7 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 tokenForLP = tokensPerLP;
         _approve(address(this), address(uniswapV2Router), tokenForLP);
         (uint256 tokenUsed, uint256 bnbUsed, ) = uniswapV2Router.addLiquidityETH{value: bnbAmount}(
-            address(this), tokenForLP, 0, 0, address(this), block.timestamp
+            address(this), tokenForLP, 0, 0, owner(), block.timestamp
         );
         emit InitialLiquidityAdded(tokenUsed, bnbUsed);
     }
@@ -806,7 +807,7 @@ contract ModaMintToken is IERC20, Ownable {
         require(tokenAmt > 0 && bnbAmt > 0, "Nothing to add");
         _approve(address(this), address(uniswapV2Router), tokenAmt);
         try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
-            address(this), tokenAmt, 0, 0, address(this), block.timestamp
+            address(this), tokenAmt, 0, 0, owner(), block.timestamp
         ) {
             pendingLiquidityTokens = 0;  // 成功后清零，而不是调用前清零
         } catch {
