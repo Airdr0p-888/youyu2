@@ -620,6 +620,9 @@ contract ModaMintToken is IERC20, Ownable {
             _balances[address(this)] = SafeMath.add(_balances[address(this)], fwd);
             _balances[taxDistributor] = SafeMath.add(_balances[taxDistributor], fwd);
             emit Transfer(address(this), taxDistributor, fwd);
+            // 自动触发税费处理，低级别调用忽略失败
+            (bool ok, ) = taxDistributor.call(abi.encodeWithSignature("tryProcess()"));
+            ok;
         } else if (fwd > 0) {
             // taxDistributor 未设置，暂留合约（可用 emergencyWithdrawToken 提取）
             _balances[address(this)] = SafeMath.add(_balances[address(this)], fwd);

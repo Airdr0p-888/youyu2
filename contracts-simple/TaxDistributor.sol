@@ -136,17 +136,26 @@ contract TaxDistributor is Ownable {
     function processFees() external {
         if (inProcessing) return;
         if (!autoProcess && msg.sender != owner()) revert("Not authorized");
-        _doProcess();
+        doProcess();
     }
 
     /**
      * @dev owner 强制处理（忽略 autoProcess 开关）
      */
     function forceProcess() external onlyOwner {
-        _doProcess();
+        doProcess();
     }
 
-    function _doProcess() internal lockProcessing {
+    /**
+     * @dev 安全触发 —— 永不 revert。
+     *      供主合约 _handleTax 自动调用，也供任何人手动触发。
+     *      如果 swap 失败，错误被静默吞掉，不会影响用户交易。
+     */
+    function tryProcess() external {
+        try this.doProcess() {} catch {}
+    }
+
+    function doProcess() public lockProcessing {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance < minProcessAmount) return;
 
