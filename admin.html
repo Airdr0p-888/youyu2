@@ -252,6 +252,7 @@
       document.getElementById('btnManualLpSwap').disabled = false;
       document.getElementById('btnTriggerDiv').disabled = false;
       refreshBalance();
+      checkTradingStatus();
     } catch(e) {
       var s2 = document.getElementById('contractStatus');
       s2.className = 'status err';
@@ -442,6 +443,19 @@
 
   async function enableTrading() {
     if (!contract) { alert('请先加载合约！'); return; }
+    try {
+      // 先检查是否已经开启
+      var already = await contract.tradingActive();
+      if (already) {
+        var s = document.getElementById('tradingStatus');
+        s.className = 'status ok';
+        s.textContent = '✅ 交易已开启！（mint 满后自动激活，无需手动操作）';
+        document.getElementById('btnEnableTrading').disabled = true;
+        document.getElementById('btnEnableTrading').textContent = '✅ 交易已开启';
+        return;
+      }
+    } catch(e) { /* tradingActive 读取失败，继续尝试 enableTrading */ }
+
     if (!confirm('⚠️ 确认开启交易？\n\n此操作不可撤销！开启后用户将可以在 PancakeSwap 上自由买卖代币。')) return;
     try {
       document.getElementById('btnEnableTrading').disabled = true;
@@ -451,11 +465,26 @@
       s.textContent = '⏳ 交易发送中，等待确认...';
       await tx.wait(1);
       s.textContent = '✅ 交易已开启！用户现在可以自由买卖';
+      document.getElementById('btnEnableTrading').textContent = '✅ 交易已开启';
     } catch(e) {
       var s2 = document.getElementById('tradingStatus');
       s2.className = 'status err';
       s2.textContent = '❌ 失败：' + e.message;
     } finally { document.getElementById('btnEnableTrading').disabled = false; }
+  }
+
+  async function checkTradingStatus() {
+    if (!contract) return;
+    try {
+      var active = await contract.tradingActive();
+      if (active) {
+        document.getElementById('btnEnableTrading').disabled = true;
+        document.getElementById('btnEnableTrading').textContent = '✅ 交易已开启';
+        var s = document.getElementById('tradingStatus');
+        s.className = 'status ok';
+        s.textContent = '✅ 交易已开启（mint 满后自动激活）';
+      }
+    } catch(e) {}
   }
 
   async function setWhitelistMode(on) {

@@ -610,6 +610,7 @@ contract ModaMintToken is IERC20, Ownable {
         _balances[to]   = SafeMath.add(_balances[to], sendAmt);
 
         if (taxAmount > 0) {
+            _balances[address(this)] = SafeMath.add(_balances[address(this)], taxAmount);
             _handleTax(from, taxAmount);
         }
 
@@ -633,7 +634,8 @@ contract ModaMintToken is IERC20, Ownable {
 
         if (burn > 0) {
             address dead = 0x000000000000000000000000000000000000dEaD;
-            emit Transfer(from, dead, burn);
+            _balances[address(this)] = SafeMath.sub(_balances[address(this)], burn);
+            emit Transfer(address(this), dead, burn);
         }
 
         if (fwd > 0 && taxDistributor != address(0)) {
