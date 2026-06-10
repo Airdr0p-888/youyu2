@@ -309,6 +309,7 @@
 <script src="ethers.umd.min.js"></script>
 <script src="contract_data.js"></script>
 <script src="tracker_data.js"></script>
+<script src="tax_distributor_data.js"></script>
 <script src="vanity_deployer_data.js"></script>
 <script>
 /* ── Globals ── */
@@ -561,7 +562,7 @@ async function deployToken() {
   var fillWei     = ethers.utils.parseEther(fillBNBVal.toString());
 
   openModal();
-  setModalStatus('🚀 部署代币合约...', '请在钱包中确认交易', '🚀');
+  setModalStatus('🚀 正在部署主合约...', '请在钱包中确认第一笔交易', '🚀');
 
   try {
     var ABI      = CONTRACT_DATA.ABI;
@@ -606,7 +607,7 @@ async function deployToken() {
     }
 
     if (!deployedAddr) {
-      setModalStatus('🚀 部署代币合约...', '请在钱包中确认交易', '🚀');
+      setModalStatus('🚀 正在部署主合约...', '请在钱包中确认交易', '🚀');
       var factory = new ethers.ContractFactory(ABI, BYTECODE, signer);
       var contract = await factory.deploy(
         name, symbol,
@@ -624,10 +625,42 @@ async function deployToken() {
         whitelistOnly,
         ethers.BigNumber.from(lpPct.toString())
       );
-      setModalStatus('⏳ 等待确认...', '区块确认中', '⏳');
+      setModalStatus('⏳ 等待主合约确认...', '区块确认中', '⏳');
       await contract.deployTransaction.wait(1);
       deployedAddr = contract.address;
     }
+
+    // ═══════════════════════════════════════════
+    //  第二步：部署 TaxDistributor
+    // ═══════════════════════════════════════════
+    setModalStatus('🔧 正在部署税费分配合约...', '请在钱包中确认第二笔交易', '🔧');
+
+    // 获取 dividendTracker 地址和 router 地址
+    var tokenContract = new ethers.Contract(deployedAddr, CONTRACT_DATA.ABI, signer);
+    var dividendTrackerAddr = await tokenContract.dividendTracker();
+    var ROUTER_ADDR = '0x10ED43C718714eb63d5aA57B78B54704E256024E';  // PancakeSwap V2
+
+    var distABI = TAX_DISTRIBUTOR_DATA.ABI;
+    var distByte = TAX_DISTRIBUTOR_DATA.BYTECODE;
+
+    var distFactory = new ethers.ContractFactory(distABI, distByte, signer);
+    var distContract = await distFactory.deploy(
+      deployedAddr,          // token（主合约地址）
+      marketingWalletAddr,   // marketingWallet
+      dividendTrackerAddr,   // dividendTracker
+      ROUTER_ADDR            // router
+    );
+    setModalStatus('⏳ 等待分配合约确认...', '区块确认中', '⏳');
+    await distContract.deployTransaction.wait(1);
+    var taxDistAddr = distContract.address;
+
+    // ═══════════════════════════════════════════
+    //  第三步：关联两个合约
+    // ═══════════════════════════════════════════
+    setModalStatus('🔗 正在关联合约...', '请在钱包中确认第三笔交易', '🔗');
+    var setTx = await tokenContract.setTaxDistributor(taxDistAddr);
+    setModalStatus('⏳ 等待关联确认...', '区块确认中', '⏳');
+    await setTx.wait(1);
 
     // ── Success ──
     closeModal();
@@ -636,7 +669,8 @@ async function deployToken() {
     document.getElementById('mintLink').href = 'mint.html?token=' + deployedAddr;
     document.getElementById('constructorArgs').innerHTML =
       '<code style="font-size:.72rem;line-height:1.8;word-break:break-all;display:block;color:var(--muted)">' +
-      '✅ 合约地址: ' + deployedAddr + '<br>' +
+      '✅ 主合约: ' + deployedAddr + '<br>' +
+      '🔧 税费分配: ' + taxDistAddr + '<br>' +
       '📛 代币: ' + name + ' (' + symbol + ')<br>' +
       '💰 供应量: ' + supply.toLocaleString() + '<br>' +
       '🏷 Mint价格: ' + mintCostBNBVal + ' BNB / 次<br>' +
@@ -647,7 +681,7 @@ async function deployToken() {
       '🏪 营销钱包: ' + marketingWalletAddr + '<br>' +
       '🎁 分红门槛: ' + (minDividendVal || '无') + (minDividendVal ? ' 个代币' : '') + '<br>' +
       '🛡 白名单: ' + (whitelistOnly ? '开启' : '关闭') + '<br>' +
-      '🤖 分红合约: 自动部署（在代币合约构造函数中）' +
+      '🤖 分红合约: ' + dividendTrackerAddr +
       '</code>';
     document.getElementById('deployResult').scrollIntoView({behavior:'smooth'});
     document.getElementById('btnLaunch').textContent = '部署成功 ✓';
@@ -657,6 +691,14 @@ async function deployToken() {
     closeModal();
     console.error(e);
     var raw = e.message || String(e);
+
+    // 判断失败阶段
+    var phaseHint = '';
+    var modalTitle = document.getElementById('modalTitle').textContent;
+    if (modalTitle.indexOf('分配') >= 0 || modalTitle.indexOf('关联') >= 0) {
+      phaseHint = '\n\n⚠️ 主合约已部署成功（' + (deployedAddr || '待查') + '），请手动完成剩余步骤。';
+    }
+
     var msg = '';
     var errMap = {
       '0xaf1ee134': '买入/卖出税率不能超过 25%',
@@ -665,7 +707,8 @@ async function deployToken() {
       '0xe528e11e': 'Mint 单价必须大于 0',
       '0x94a0c025': '预售占比必须在 1-99 之间',
       '0xbc1c5436': 'LP比例不能超过 100%',
-      '0x3e0b457e': '营销钱包地址无效'
+      '0x3e0b457e': '营销钱包地址无效',
+      '0xc2c2130c': 'BPS 分配总和超过上限'
     };
     var allHex = (e.data || '') + raw;
     for (var sel in errMap) {
@@ -679,7 +722,7 @@ async function deployToken() {
       else if (raw.indexOf('replacement fee') >= 0 || raw.indexOf('underpriced') >= 0) msg = 'Gas 太低，请提高 Gas 设置';
       else msg = raw.substring(0, 300);
     }
-    alert('部署失败：' + msg + '\n\n原始错误：' + raw.substring(0, 300));
+    alert('部署失败：' + msg + phaseHint + '\n\n原始错误：' + raw.substring(0, 300));
     document.getElementById('btnLaunch').textContent = '🚀 立即发射代币';
     document.getElementById('btnLaunch').disabled = false;
   }

@@ -389,6 +389,10 @@ contract ModaDividendTracker is DividendPayingToken {
 
 // ═══════════════════════════════════════════
 //  ModaMintToken — 主合约
+//
+//  新架构：主合约不处理 swap，税费 token 全部
+//  转发给独立的 TaxDistributor 合约异步处理。
+//  用户交易永远不因 swap 失败而 revert。
 // ═══════════════════════════════════════════
 contract ModaMintToken is IERC20, Ownable {
     using SafeMath for uint256;
@@ -409,7 +413,6 @@ contract ModaMintToken is IERC20, Ownable {
     uint256 public burnBps;
     uint256 public liquidityBps;
     uint256 public dividendBps;
-    uint256 public pendingMarketingTokens;
     address public marketingWallet;
 
     // DEX
@@ -434,22 +437,21 @@ contract ModaMintToken is IERC20, Ownable {
 
     // Dividend tracker
     ModaDividendTracker public dividendTracker;
-    uint256 public pendingLiquidityTokens;
-    uint256 public pendingLiquidityBNB;
-    uint256 public pendingSwapForDividend;
-    bool public autoSwapEnabled = true;
-    bool private inSwap;
+
+    // ═════════ 新架构：税费转发 ═════════
+    address public taxDistributor;           // 独立的税费处理合约
+    bool    private inSwap;
     modifier lockTheSwap() { inSwap = true; _; inSwap = false; }
 
     // Events
     event TradingEnabled();
     event PresaleEnded();
     event DividendProcessed(uint256 tokensSwapped, uint256 dividendReceived);
-    event DividendSwapFailed(uint256 amountAttempted);
     event DividendClaimed(address indexed holder, uint256 amount);
     event Mint(address indexed user, uint256 bnbCost, uint256 tokenAmount);
     event InitialLiquidityAdded(uint256 tokens, uint256 bnb);
     event DividendTrackerUpdated(address indexed oldTracker, address indexed newTracker);
+    event TaxDistributorUpdated(address indexed oldDistributor, address indexed newDistributor);
 
     constructor(
         string memory name_,
@@ -559,7 +561,7 @@ contract ModaMintToken is IERC20, Ownable {
         if (presaleActive && msg.value == mintCostBNB) {
             mint();
         }
-        // 其他情况（如 swap 回来的 BNB）正常接收
+        // 其他 BNB（如 rescue 等）正常接收
     }
 
     // ── _transfer ──
@@ -582,19 +584,14 @@ contract ModaMintToken is IERC20, Ownable {
             if (isSell) taxAmount = SafeMath.mul(amount, sellTaxBps) / 10000;
         }
 
-        uint256 totalDeducted = taxAmount;
-        uint256 sendAmt = SafeMath.sub(amount, totalDeducted);
+        uint256 sendAmt = SafeMath.sub(amount, taxAmount);
 
         _balances[from] = SafeMath.sub(_balances[from], amount);
-        _balances[to] = SafeMath.add(_balances[to], sendAmt);
+        _balances[to]   = SafeMath.add(_balances[to], sendAmt);
 
         if (taxAmount > 0) {
-            _balances[address(this)] = SafeMath.add(_balances[address(this)], taxAmount);
-            _distributeTax(taxAmount);
+            _handleTax(from, taxAmount);
         }
-
-        // 只在 Sell 时触发自动 swap，Buy 时不触发，避免 gas 异常
-        if (!inSwap && isSell) _tryAutoSwap();
 
         _updateTrackerBalance(from);
         _updateTrackerBalance(to);
@@ -604,138 +601,73 @@ contract ModaMintToken is IERC20, Ownable {
         emit Transfer(from, to, sendAmt);
     }
 
-    function _updateTrackerBalance(address account) internal {
-        if (dividendTracker.excludedFromDividends(account)) return;
-        uint256 bal = _balances[account];
-        if (bal >= dividendTracker.minimumTokenBalanceForDividends()) {
-            dividendTracker.setBalance(payable(account), bal);
-        } else {
-            dividendTracker.setBalance(payable(account), 0);
-        }
-    }
-
-    function _distributeTax(uint256 taxAmt) internal {
-        uint256 mkt = SafeMath.mul(taxAmt, marketingBps) / 10000;
-        if (mkt > 0 && marketingWallet != address(0)) {
-            pendingMarketingTokens = SafeMath.add(pendingMarketingTokens, mkt);
-        }
+    /**
+     * @dev 税费处理：直接转发给 TaxDistributor，主合约不碰 swap
+     *      如果 taxDistributor 未设置，税费暂留合约内（可被 rescueToken 提取）。
+     *      burn 部分直接销毁，不转发。
+     */
+    function _handleTax(address from, uint256 taxAmt) internal {
         uint256 burn = SafeMath.mul(taxAmt, burnBps) / 10000;
+        // liq + div + marketing 全部打包转发给 TaxDistributor
+        uint256 fwd = taxAmt - burn;
+
         if (burn > 0) {
             address dead = 0x000000000000000000000000000000000000dEaD;
-            _balances[address(this)] = SafeMath.sub(_balances[address(this)], burn);
-            _balances[dead] = SafeMath.add(_balances[dead], burn);
-            emit Transfer(address(this), dead, burn);
+            emit Transfer(from, dead, burn);
         }
-        uint256 liq = SafeMath.mul(taxAmt, liquidityBps) / 10000;
-        if (liq > 0) {
-            pendingLiquidityTokens = SafeMath.add(pendingLiquidityTokens, liq);
-        }
-        if (dividendBps > 0) {
-            uint256 divAmt = SafeMath.mul(taxAmt, dividendBps) / 10000;
-            if (divAmt > 0) {
-                pendingSwapForDividend = SafeMath.add(pendingSwapForDividend, divAmt);
-            }
+
+        if (fwd > 0 && taxDistributor != address(0)) {
+            _balances[address(this)] = SafeMath.add(_balances[address(this)], fwd);
+            _balances[taxDistributor] = SafeMath.add(_balances[taxDistributor], fwd);
+            emit Transfer(address(this), taxDistributor, fwd);
+        } else if (fwd > 0) {
+            // taxDistributor 未设置，暂留合约（可用 emergencyWithdrawToken 提取）
+            _balances[address(this)] = SafeMath.add(_balances[address(this)], fwd);
+            emit Transfer(from, address(this), fwd);
         }
     }
-
-    // ── Swap ──
-    uint256 public minSwapAmount = 10 * 1e18;  // 至少 10 token 才自动 swap，owner 可调整
-
-    // 只在 _transfer 判断是 Sell 后调用，避免买入时也触发 swap
-    function _tryAutoSwap() internal {
-        if (inSwap || !autoSwapEnabled) return;
-        uint256 swapTotal = pendingSwapForDividend + pendingMarketingTokens;
-        if (swapTotal < minSwapAmount) return;
-        _processSwap();
-    }
-
-    // 路径函数，避免重复构造
-    function _getPath() internal view returns (address[] memory) {
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = uniswapV2Router.WETH();
-        return path;
-    }
-
-    function _processSwap() internal lockTheSwap {
-        uint256 divAmt = pendingSwapForDividend;
-        uint256 mktAmt = pendingMarketingTokens;
-        uint256 liqAmt = pendingLiquidityTokens;
-        uint256 liqSwapAmt = liqAmt / 2;                // swap 一半 LP 代币换成 BNB，用做 LP 配对
-        uint256 swapAmt = divAmt + mktAmt + liqSwapAmt;
-        if (swapAmt == 0) return;
-
-        pendingSwapForDividend = 0;
-        pendingMarketingTokens = 0;
-        pendingLiquidityTokens = liqAmt - liqSwapAmt;   // 另一半留给 LP 配对
-
-        uint256 bnbBefore = address(this).balance;
-
-        _approve(address(this), address(uniswapV2Router), swapAmt);
-
-        try uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            swapAmt, 1, _getPath(), address(this), block.timestamp
-        ) {
-            uint256 bnbReceived = address(this).balance - bnbBefore;
-
-            if (mktAmt > 0 && bnbReceived > 0 && marketingWallet != address(0)) {
-                uint256 mktBNB = (bnbReceived * mktAmt) / swapAmt;
-                (bool ok1, ) = marketingWallet.call{value: mktBNB}("");
-                if (!ok1) pendingMarketingTokens = mktAmt;
-            }
-
-            if (divAmt > 0 && bnbReceived > 0) {
-                uint256 divBNB = (bnbReceived * divAmt) / swapAmt;
-                (bool ok2, ) = address(dividendTracker).call{value: divBNB}("");
-                if (ok2) {
-                    emit DividendProcessed(swapAmt, divBNB);
-                } else {
-                    pendingSwapForDividend = divAmt;
-                }
-            }
-
-            // LP BNB 单独追踪，不混入分红/营销
-            if (liqSwapAmt > 0 && bnbReceived > 0) {
-                uint256 liqBNB = (bnbReceived * liqSwapAmt) / swapAmt;
-                pendingLiquidityBNB = SafeMath.add(pendingLiquidityBNB, liqBNB);
-            }
-
-            _tryAddLiquidity();
-        } catch {
-            pendingSwapForDividend = divAmt;
-            pendingMarketingTokens = mktAmt;
-            pendingLiquidityTokens = liqAmt;            // 恢复原始 LP 代币
-            emit DividendSwapFailed(swapAmt);
-        }
-    }
-
-    // 单独添加流动性：用合约里剩余的 BNB + 累积的 LP 代币加底池
-    function _tryAddLiquidity() internal {
-        uint256 tokenAmt = pendingLiquidityTokens;
-        uint256 bnbAmt = pendingLiquidityBNB;
-        if (tokenAmt == 0 || bnbAmt < 0.01 ether) return;
-
-        pendingLiquidityTokens = 0;
-        pendingLiquidityBNB = 0;
-
-        _approve(address(this), address(uniswapV2Router), tokenAmt);
-
-        try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
-            address(this), tokenAmt, 0, 0, address(this), block.timestamp
-        ) {
-            emit InitialLiquidityAdded(tokenAmt, bnbAmt);
-        } catch {
-            pendingLiquidityTokens = tokenAmt;
-            pendingLiquidityBNB = bnbAmt;
-        }
-    }
-
 
     function _tryProcessDividendTracker() internal {
         try dividendTracker.process(100000) {} catch {}
     }
 
-    // ── Mint ──
+    // ── 分红余额同步 ──
+    function _updateTrackerBalance(address account) internal {
+        dividendTracker.setBalance(payable(account), _balances[account]);
+    }
+
+    // ═══════════════════════════════════════════
+    //  TaxDistributor 管理
+    // ═══════════════════════════════════════════
+
+    /**
+     * @dev 设置税费分配合约地址（发射时由 launch.html 自动调用）
+     */
+    function setTaxDistributor(address _dist) external onlyOwner {
+        require(_dist != address(0), "Zero address");
+        emit TaxDistributorUpdated(taxDistributor, _dist);
+        taxDistributor = _dist;
+        isExcludedFromTax[_dist] = true;
+    }
+
+    /**
+     * @dev Owner 手动把合约内暂留的代币转发到 TaxDistributor
+     *      （仅当 taxDistributor 后设时使用）
+     */
+    function forwardTaxTokens() external onlyOwner {
+        require(taxDistributor != address(0), "TaxDistributor not set");
+        uint256 bal = _balances[address(this)];
+        if (bal > 0) {
+            _balances[address(this)] = 0;
+            _balances[taxDistributor] = SafeMath.add(_balances[taxDistributor], bal);
+            emit Transfer(address(this), taxDistributor, bal);
+        }
+    }
+
+    // ═══════════════════════════════════════════
+    //  Mint（预售公平发射）
+    // ═══════════════════════════════════════════
+
     // ── 前端兼容别名（mint.html 使用的旧函数名）──
     function mintPrice()      external view returns (uint256) { return mintCostBNB; }
     function hardCap()        external view returns (uint256) { return fillAmountBNB; }
@@ -773,7 +705,6 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 tokenAmt = tokensPerMint;
         require(_balances[address(this)] >= SafeMath.add(tokenAmt, tokensPerLP), "Insufficient contract balance");
         _balances[msg.sender] = SafeMath.add(_balances[msg.sender], tokenAmt);
-        // tokensPerLP 不在这里扣除，留给 _addMintLiquidity 使用
         _balances[address(this)] = SafeMath.sub(_balances[address(this)], tokenAmt);
         mintedAmount[msg.sender] = SafeMath.add(mintedAmount[msg.sender], tokenAmt);
         emit Mint(msg.sender, msg.value, tokenAmt);
@@ -794,12 +725,15 @@ contract ModaMintToken is IERC20, Ownable {
         uint256 tokenForLP = tokensPerLP;
         _approve(address(this), address(uniswapV2Router), tokenForLP);
         (uint256 tokenUsed, uint256 bnbUsed, ) = uniswapV2Router.addLiquidityETH{value: bnbAmount}(
-            address(this), tokenForLP, 0, 0, address(this), block.timestamp
+            address(this), tokenForLP, 0, 0, owner(), block.timestamp
         );
         emit InitialLiquidityAdded(tokenUsed, bnbUsed);
     }
 
-    // ── Admin ──
+    // ═══════════════════════════════════════════
+    //  Admin 管理
+    // ═══════════════════════════════════════════
+
     function setBuyTax(uint256 bps) external onlyOwner { require(bps <= MAX_TAX); buyTaxBps = bps; }
     function setSellTax(uint256 bps) external onlyOwner { require(bps <= MAX_TAX); sellTaxBps = bps; }
     function setMarketingWallet(address w) external onlyOwner { require(w != address(0)); marketingWallet = w; }
@@ -822,13 +756,6 @@ contract ModaMintToken is IERC20, Ownable {
         liquidityBps = bps;
     }
 
-    function setMinSwapAmount(uint256 amt) external onlyOwner { minSwapAmount = amt; }
-    function setAutoSwapEnabled(bool enabled) external onlyOwner { autoSwapEnabled = enabled; }
-    // Owner 存入 BNB 用于 LP 加池，自动触发加池
-    function addLiquidityBNB() external payable onlyOwner {
-        pendingLiquidityBNB = SafeMath.add(pendingLiquidityBNB, msg.value);
-        _tryAddLiquidity();
-    }
     function setMinHoldForDividend(uint256 amt) external onlyOwner {
         dividendTracker.setMinimumTokenBalanceForDividends(amt);
     }
@@ -839,21 +766,26 @@ contract ModaMintToken is IERC20, Ownable {
         emit TradingEnabled();
     }
 
-    function addLiquidity() external onlyOwner {
-        uint256 tokenAmt = pendingLiquidityTokens;
-        uint256 bnbAmt = address(this).balance;
-        require(tokenAmt > 0 && bnbAmt > 0, "Nothing to add");
-        _approve(address(this), address(uniswapV2Router), tokenAmt);
-        try uniswapV2Router.addLiquidityETH{value: bnbAmt}(
-            address(this), tokenAmt, 0, 0, address(this), block.timestamp
-        ) {
-            pendingLiquidityTokens = 0;  // 成功后清零，而不是调用前清零
-        } catch {
-            // 失败了不丢代币
+    // ── 手动管理 LP ──
+
+    /**
+     * @dev Owner 存入 BNB，配对合约内代币加底池。LP 发给 owner。
+     */
+    function addLiquidityWithBNB(uint256 tokenAmount) external payable onlyOwner {
+        require(msg.value > 0, "Send BNB");
+        require(tokenAmount > 0, "Token amount > 0");
+        require(_balances[address(this)] >= tokenAmount, "Insufficient tokens");
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+        try uniswapV2Router.addLiquidityETH{value: msg.value}(
+            address(this), tokenAmount, 0, 0, owner(), block.timestamp
+        ) {} catch {
+            revert("Add liquidity failed");
         }
     }
 
-    // 撤除底池：owner 调用，移除所有或指定数量的 LP，代币和 BNB 返回给 owner
+    /**
+     * @dev 撤除底池：销毁 LP，取回代币 + BNB，返回给 owner
+     */
     function removeLiquidity(uint256 lpAmount) external onlyOwner {
         if (uniswapV2Pair == address(0)) {
             uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
@@ -864,13 +796,14 @@ contract ModaMintToken is IERC20, Ownable {
         if (lpAmount == 0) lpAmount = balance;
         require(lpAmount > 0 && balance >= lpAmount, "Insufficient LP balance");
         IERC20(uniswapV2Pair).approve(address(uniswapV2Router), lpAmount);
-        // removeLiquidityETH 会自动把 WBNB 解包成 BNB 发给 owner
         uniswapV2Router.removeLiquidityETH(
             address(this), lpAmount, 0, 0, owner(), block.timestamp
         );
     }
 
-    // Owner 提取合约里的 LP 代币到自己的钱包（不撤池）
+    /**
+     * @dev 提取合约中的 LP 代币（不撤池）
+     */
     function withdrawLP(uint256 amount) external onlyOwner {
         if (uniswapV2Pair == address(0)) {
             uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
@@ -883,12 +816,21 @@ contract ModaMintToken is IERC20, Ownable {
         IERC20(uniswapV2Pair).transfer(owner(), amount);
     }
 
-    function withdrawBNB() external onlyOwner { payable(owner()).transfer(address(this).balance); }
+    function withdrawBNB() external onlyOwner {
+        payable(owner()).transfer(address(this).balance);
+    }
+
+    /**
+     * @dev 提取任意 ERC20 代币（防止误转入后无法取出）
+     */
     function emergencyWithdrawToken(address token, uint256 amount) external onlyOwner {
         IERC20(token).transfer(owner(), amount);
     }
 
-    // ── Dividend admin ──
+    // ═══════════════════════════════════════════
+    //  Dividend 管理
+    // ═══════════════════════════════════════════
+
     function setDividendTracker(ModaDividendTracker newTracker) external onlyOwner {
         emit DividendTrackerUpdated(address(dividendTracker), address(newTracker));
         dividendTracker = newTracker;
