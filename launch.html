@@ -221,12 +221,17 @@
     </div>
 
     <div class="field">
-      <label><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--green);margin-right:6px;vertical-align:middle"></span>分红：<strong id="taxDistVal">100</strong>%</label>
+      <label><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--green);margin-right:6px;vertical-align:middle"></span>分红：<strong id="taxDistVal">0</strong>%</label>
       <div class="slider-row">
         <span style="color:var(--muted);font-size:.72rem">0</span>
-        <input type="range" id="taxDistSlider" min="0" max="100" value="100" oninput="onTaxAllocChange('distribute')" />
+        <input type="range" id="taxDistSlider" min="0" max="100" value="0" oninput="onTaxAllocChange('distribute')" />
         <span style="color:var(--muted);font-size:.72rem">100</span>
       </div>
+    </div>
+
+    <div class="hint" style="margin-top:8px;padding:6px 10px;background:var(--bg3);border-radius:6px;font-size:.72rem">
+      💡 四项各自独立拖动，超出剩余空间时自动截断当前项。<br>
+      总和必须为 100%，当前：<strong id="taxSumDisplay">0</strong>%
     </div>
 
     <!-- 分配可视化条 -->
@@ -234,7 +239,7 @@
       <div id="taxBarMkt" style="background:var(--gold);width:0%;transition:width .2s"></div>
       <div id="taxBarBurn" style="background:var(--red);width:0%;transition:width .2s"></div>
       <div id="taxBarLp" style="background:var(--cyan);width:0%;transition:width .2s"></div>
-      <div id="taxBarDist" style="background:var(--green);width:100%;transition:width .2s"></div>
+      <div id="taxBarDist" style="background:var(--green);width:0%;transition:width .2s"></div>
     </div>
 
     <div class="field" style="margin-top:14px">
@@ -366,7 +371,7 @@ function calcMintInfo() {
    超出剩余空间时自动截断当前滑块。
    部署时校验四项之和 = 100%。
 ────────────────────────────────────────── */
-var _taxVals = { marketing:0, burn:0, lp:0, distribute:100 };
+var _taxVals = { marketing:0, burn:0, lp:0, distribute:0 };
 
 function onTaxAllocChange(changed) {
   var sliderIds = {
@@ -381,19 +386,17 @@ function onTaxAllocChange(changed) {
   var slider = document.getElementById(sliderIds[changed]);
   var newVal = parseInt(slider.value) || 0;
 
-  // 计算其他三项之和，截断上限
+  // 计算其他三项之和，当前项上限 = 剩余空间
   var otherSum = 0;
   for (var k in _taxVals) {
     if (k !== changed) otherSum += _taxVals[k];
   }
-
   var capped = Math.min(newVal, 100 - otherSum);
-  if (capped !== newVal) {
-    slider.value = capped;
-  }
+  if (capped !== newVal) slider.value = capped;
 
   _taxVals[changed] = capped;
   document.getElementById(displayIds[changed]).textContent = capped;
+
   updateTaxBar();
   updateTaxRemaining();
 }
@@ -407,10 +410,15 @@ function updateTaxBar() {
 
 function updateTaxRemaining() {
   var sum = _taxVals.marketing + _taxVals.burn + _taxVals.lp + _taxVals.distribute;
+  // 剩余可分配
   var r = 100 - sum;
-  var el = document.getElementById('taxRemaining');
-  el.textContent = r + '%';
-  el.style.color = r === 0 ? 'var(--success)' : 'var(--danger)';
+  var elR = document.getElementById('taxRemaining');
+  elR.textContent = r + '%';
+  elR.style.color = r === 0 ? 'var(--green)' : 'var(--danger)';
+  // 总和显示
+  var elS = document.getElementById('taxSumDisplay');
+  elS.textContent = sum;
+  elS.style.color = sum === 100 ? 'var(--green)' : 'var(--danger)';
 }
 
 /* ── Distributor mode (removed, tracker auto-deployed) ── */
@@ -640,15 +648,27 @@ async function deployToken() {
     var dividendTrackerAddr = await tokenContract.dividendTracker();
     var ROUTER_ADDR = '0x10ED43C718714eb63d5aA57B78B54704E256024E';  // PancakeSwap V2
 
+    // ── 计算 TaxDistributor 的归一化 BPS ────────
+    // 主合约 burn 掉 burnBps 后，剩下的发送给 TaxDistributor
+    // TaxDistributor 需要按营销/LP/分红 的相对比例分配
+    var nonBurnPct = taxAllocMkt + taxAllocLp + taxAllocDist;  // = 100 - burn
+    if (nonBurnPct === 0) nonBurnPct = 1;
+    var taxDistMktBps = Math.floor(taxAllocMkt * 10000 / nonBurnPct);
+    var taxDistDivBps = Math.floor(taxAllocDist * 10000 / nonBurnPct);
+    var taxDistLpBps  = 10000 - taxDistMktBps - taxDistDivBps; // 确保总和=10000
+
     var distABI = TAX_DISTRIBUTOR_DATA.ABI;
     var distByte = TAX_DISTRIBUTOR_DATA.BYTECODE;
 
     var distFactory = new ethers.ContractFactory(distABI, distByte, signer);
     var distContract = await distFactory.deploy(
-      deployedAddr,          // token（主合约地址）
-      marketingWalletAddr,   // marketingWallet
-      dividendTrackerAddr,   // dividendTracker
-      ROUTER_ADDR            // router
+      deployedAddr,           // token（主合约地址）
+      marketingWalletAddr,    // marketingWallet
+      dividendTrackerAddr,    // dividendTracker
+      ROUTER_ADDR,            // router
+      ethers.BigNumber.from(taxDistMktBps.toString()),   // marketingBps
+      ethers.BigNumber.from(taxDistDivBps.toString()),   // dividendBps
+      ethers.BigNumber.from(taxDistLpBps.toString())     // lpBps
     );
     setModalStatus('⏳ 等待分配合约确认...', '区块确认中', '⏳');
     await distContract.deployTransaction.wait(1);
@@ -727,6 +747,20 @@ async function deployToken() {
     document.getElementById('btnLaunch').disabled = false;
   }
 }
+</script>
+<script>
+  // 页面加载时强制初始化税收滑块（防止浏览器记住上一次的值）
+  window.addEventListener('DOMContentLoaded', function() {
+    ['taxMktSlider','taxBurnSlider','taxLpSlider','taxDistSlider'].forEach(function(id) {
+      document.getElementById(id).value = 0;
+    });
+    _taxVals = { marketing:0, burn:0, lp:0, distribute:0 };
+    ['taxMktVal','taxBurnVal','taxLpVal','taxDistVal'].forEach(function(id) {
+      document.getElementById(id).textContent = '0';
+    });
+    updateTaxBar();
+    updateTaxRemaining();
+  });
 </script>
 </body>
 </html>

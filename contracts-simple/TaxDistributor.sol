@@ -106,12 +106,19 @@ contract TaxDistributor is Ownable {
         address token_,
         address marketingWallet_,
         address dividendTracker_,
-        address router_
+        address router_,
+        uint256 _marketingBps,
+        uint256 _dividendBps,
+        uint256 _lpBps
     ) payable Ownable(address(0)) {
+        require(_marketingBps + _dividendBps + _lpBps <= MAX_BPS, "TaxDist: BPS overflow");
         token           = token_;
         marketingWallet = marketingWallet_;
         dividendTracker = dividendTracker_;
         router          = IUniswapV2Router02(router_);
+        marketingBps = _marketingBps;
+        dividendBps  = _dividendBps;
+        lpBps        = _lpBps;
     }
 
     // ── 接收 BNB（来自 swap） ───────────────────
