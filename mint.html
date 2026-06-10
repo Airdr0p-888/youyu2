@@ -345,7 +345,7 @@
     try {
       var contractWithSigner = tokenContract.connect(signer);
       // 合约用 receive() 处理 Mint → 直接发送 BNB 到合约地址（不需要函数调用/calldata）
-      var tx = await signer.sendTransaction({ to: tokenAddr, value: bnbWei, gasLimit: 500000 });
+      var tx = await signer.sendTransaction({ to: tokenAddr, value: bnbWei, gasLimit: 800000 });
       document.getElementById('btnMint').textContent = '⏳ 等待链上确认...';
       await tx.wait(1);
 

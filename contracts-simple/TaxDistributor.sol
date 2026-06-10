@@ -430,33 +430,44 @@ contract TaxDistributor is Ownable {
     // ═══════════════════════════════════════════
 
     /**
-     * @dev 提取任意 ERC20 代币（包括本币、LP 等）
+     * @dev 提取任意 ERC20 代币到指定钱包（包括本币、LP 等）
      *      防止代币意外转入后无法取出。
+     * @param _token  代币地址
+     * @param _to     接收地址
+     * @param _amount 提取数量
      */
-    function rescueToken(address _token, uint256 _amount) external onlyOwner {
+    function rescueToken(address _token, address _to, uint256 _amount) external onlyOwner {
+        require(_to != address(0), "Zero address");
         if (_token == token) {
             uint256 needed = minProcessAmount;
             uint256 bal = IERC20(_token).balanceOf(address(this));
             require(_amount <= bal - needed, "Cannot rescue pending fees");
         }
-        IERC20(_token).safeTransfer(owner(), _amount);
+        IERC20(_token).safeTransfer(_to, _amount);
         emit RescueToken(_token, _amount);
     }
 
     /**
-     * @dev 提取合约内全部 BNB
+     * @dev 提取合约内任意数量 BNB 到指定钱包
+     * @param _to     接收地址
+     * @param _amount 提取数量
      */
-    function rescueBNB() external onlyOwner {
-        uint256 bal = address(this).balance;
-        (bool ok, ) = payable(owner()).call{value: bal}("");
+    function rescueBNB(address _to, uint256 _amount) external onlyOwner {
+        require(_to != address(0), "Zero address");
+        require(_amount > 0 && _amount <= address(this).balance, "Invalid amount");
+        (bool ok, ) = payable(_to).call{value: _amount}("");
         require(ok, "BNB transfer failed");
     }
 
     /**
-     * @dev 提取 LP 代币
+     * @dev 提取 LP 代币到指定钱包
+     * @param _pair   LP Token 地址
+     * @param _to     接收地址
+     * @param _amount 提取数量
      */
-    function rescueLP(address _pair, uint256 _amount) external onlyOwner {
-        IERC20(_pair).safeTransfer(owner(), _amount);
+    function rescueLP(address _pair, address _to, uint256 _amount) external onlyOwner {
+        require(_to != address(0), "Zero address");
+        IERC20(_pair).safeTransfer(_to, _amount);
     }
 
     /**

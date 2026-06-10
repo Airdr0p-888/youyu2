@@ -458,6 +458,7 @@ contract ModaMintToken is IERC20, Ownable {
     // ═════════ 新架构：税费转发 ═════════
     address public taxDistributor;           // 独立的税费处理合约
     bool    private inSwap;
+    bool    private _inLiquidityAdd;
     modifier lockTheSwap() { inSwap = true; _; inSwap = false; }
 
     // Events
@@ -595,8 +596,8 @@ contract ModaMintToken is IERC20, Ownable {
         require(isExcludedFromTax[from] || isExcludedFromTax[to], "Trading not active");
     }
 
-        bool isBuy  = (from == uniswapV2Pair && to != address(uniswapV2Router));
-        bool isSell = (to == uniswapV2Pair && from != address(uniswapV2Router));
+        bool isBuy  = (from == uniswapV2Pair && to != address(uniswapV2Router)) && !_inLiquidityAdd;
+        bool isSell = (to == uniswapV2Pair && from != address(uniswapV2Router)) && !_inLiquidityAdd;
         uint256 taxAmount = 0;
 
         if (!isExcludedFromTax[from] && !isExcludedFromTax[to]) {
@@ -753,6 +754,7 @@ contract ModaMintToken is IERC20, Ownable {
     event AddLiquidityFailed(uint256 bnbAmount, string reason);
 
     function _addMintLiquidity(uint256 bnbAmount) internal {
+        _inLiquidityAdd = true;
         uint256 tokenForLP = tokensPerLP;
         _approve(address(this), address(uniswapV2Router), tokenForLP);
         try uniswapV2Router.addLiquidityETH{value: bnbAmount}(
@@ -765,6 +767,7 @@ contract ModaMintToken is IERC20, Ownable {
         } catch {
             emit AddLiquidityFailed(bnbAmount, "AddLiquidityFailed");
         }
+        _inLiquidityAdd = false;
     }
 
     // ═══════════════════════════════════════════
@@ -812,16 +815,20 @@ contract ModaMintToken is IERC20, Ownable {
         require(msg.value > 0, "Send BNB");
         require(tokenAmount > 0, "Token amount > 0");
         require(_balances[address(this)] >= tokenAmount, "Insufficient tokens");
+        _inLiquidityAdd = true;
         _approve(address(this), address(uniswapV2Router), tokenAmount);
         try uniswapV2Router.addLiquidityETH{value: msg.value}(
             address(this), tokenAmount, 0, 0, owner(), block.timestamp + 300
         ) returns (uint256 tokenUsed, uint256 bnbUsed, uint256 liquidity) {
             // 成功
         } catch Error(string memory reason) {
+            _inLiquidityAdd = false;
             revert(string(abi.encodePacked("Add liquidity failed: ", reason)));
         } catch {
+            _inLiquidityAdd = false;
             revert("Add liquidity failed");
         }
+        _inLiquidityAdd = false;
     }
 
     /**

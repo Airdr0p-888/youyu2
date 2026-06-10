@@ -252,11 +252,55 @@
       <!-- 救援 -->
       <div style="margin-top:14px; padding-top:14px; border-top:1px dashed var(--border);">
         <label style="font-weight:600;font-size:.88rem;">🚑 救援提取</label>
-        <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px;">提取税费合约中滞留的 BNB / 代币（仅 owner）</div>
-        <div class="flex-gap">
-          <button id="btnTaxRescueBNB" class="btn btn-outline" onclick="taxRescueBNB()" disabled>💰 提取全部 BNB</button>
-          <button id="btnTaxRescueToken" class="btn btn-outline" onclick="taxRescueToken()" disabled>🪙 提取本币（超出阈值部分）</button>
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px;">提取税费合约中滞留的 BNB / 代币 / LP 到指定钱包（仅 owner）</div>
+
+        <!-- 目标钱包 -->
+        <div class="field" style="margin-bottom:8px;">
+          <label>接收钱包地址（留空 = owner）</label>
+          <input type="text" id="taxRescueTo" placeholder="0x... 留空默认 owner" style="font-family:var(--monospace);" />
         </div>
+
+        <!-- BNB 提取 -->
+        <div class="flex-gap" style="align-items:flex-end;margin-bottom:6px;">
+          <div class="field" style="flex:1;margin-bottom:0;">
+            <label>BNB 数量（留空 = 全部）</label>
+            <input type="text" id="taxRescueBnbAmt" placeholder="留空=全部" />
+          </div>
+          <button id="btnTaxRescueBNB" class="btn btn-outline" onclick="taxRescueBNB()" disabled>💰 提取 BNB</button>
+        </div>
+
+        <!-- 本币提取 -->
+        <div class="flex-gap" style="align-items:flex-end;margin-bottom:6px;">
+          <div class="field" style="flex:1;margin-bottom:0;">
+            <label>本币数量（留空 = 超出阈值部分）</label>
+            <input type="text" id="taxRescueTokenAmt" placeholder="留空=超出阈值" />
+          </div>
+          <button id="btnTaxRescueToken" class="btn btn-outline" onclick="taxRescueToken()" disabled>🪙 提取本币</button>
+        </div>
+
+        <!-- 任意代币提取 -->
+        <div style="margin-top:6px; padding-top:8px; border-top:1px dotted var(--border);">
+          <label style="font-size:.78rem;color:var(--muted);">🪙 提取任意 ERC20 代币（意外转入等）</label>
+          <div class="field" style="margin-bottom:4px;">
+            <input type="text" id="taxRescueAnyAddr" placeholder="代币合约地址 0x..." style="font-family:var(--monospace);" />
+          </div>
+          <div class="field" style="margin-bottom:6px;">
+            <input type="text" id="taxRescueAnyAmt" placeholder="留空=全部" />
+          </div>
+          <button id="btnTaxRescueAny" class="btn btn-outline" onclick="taxRescueAnyToken()" disabled>🚑 提取该代币</button>
+        </div>
+
+        <!-- LP 提取 -->
+        <div style="margin-top:6px; padding-top:8px; border-top:1px dotted var(--border);">
+          <label style="font-size:.78rem;color:var(--muted);">💧 提取 LP 代币</label>
+          <div class="flex-gap" style="align-items:flex-end;">
+            <div class="field" style="flex:1;margin-bottom:0;">
+              <input type="text" id="taxRescueLPAddr" placeholder="LP Token 合约地址 0x..." style="font-family:var(--monospace);" />
+            </div>
+            <button id="btnTaxRescueLP" class="btn btn-outline" onclick="taxRescueLP()" disabled>📤 提取 LP</button>
+          </div>
+        </div>
+
         <div id="taxRescueStatus" class="status"></div>
       </div>
     </div>
@@ -723,6 +767,8 @@
       document.getElementById('btnToggleAuto').textContent = '自动处理：' + (auto ? '✅ 关闭' : '❌ 开启');
       document.getElementById('btnTaxRescueBNB').disabled = !isOwner;
       document.getElementById('btnTaxRescueToken').disabled = !isOwner;
+      document.getElementById('btnTaxRescueAny').disabled = !isOwner;
+      document.getElementById('btnTaxRescueLP').disabled = !isOwner;
       var s = document.getElementById('taxStatus');
       s.className = 'status ok';
       s.textContent = '✅ 税费合约加载成功';
@@ -848,20 +894,37 @@
     } finally { document.getElementById('btnToggleAuto').disabled = false; }
   }
 
+  function _taxRescueTo() {
+    var v = document.getElementById('taxRescueTo').value.trim();
+    return v || null; // null → 让合约用默认行为（实际必须传地址，回退到 owner）
+  }
+
   async function taxRescueBNB() {
     if (!taxContract) { alert('请先加载税费合约！'); return; }
     try {
+      var toAddr = _taxRescueTo() || userAddr;
+      var amtStr = document.getElementById('taxRescueBnbAmt').value.trim();
       var provider = new ethers.providers.Web3Provider(window.ethereum);
       var bal = await provider.getBalance(taxContract.address);
       if (bal.isZero()) { alert('税费合约内没有 BNB！'); return; }
-      var bnb = parseFloat(ethers.utils.formatEther(bal)).toFixed(6);
-      if (!confirm('确认提取税费合约中全部 ' + bnb + ' BNB 到 owner 地址？')) return;
+
+      var amount;
+      if (!amtStr) {
+        amount = bal;
+        var bnb = parseFloat(ethers.utils.formatEther(bal)).toFixed(6);
+        if (!confirm('确认提取全部 ' + bnb + ' BNB 到 ' + toAddr + ' ？')) return;
+      } else {
+        amount = ethers.utils.parseEther(amtStr);
+        if (amount.gt(bal)) { alert('余额不足！当前余额：' + parseFloat(ethers.utils.formatEther(bal)).toFixed(6) + ' BNB'); return; }
+        if (!confirm('确认提取 ' + amtStr + ' BNB 到 ' + toAddr + ' ？')) return;
+      }
+
       document.getElementById('btnTaxRescueBNB').disabled = true;
-      var tx = await taxContract.rescueBNB();
-      await tx.wait(1);
       var s = document.getElementById('taxRescueStatus');
-      s.className = 'status ok';
-      s.textContent = '✅ 已提取 ' + bnb + ' BNB';
+      s.className = 'status ok'; s.textContent = '⏳ 交易发送中...';
+      var tx = await taxContract.rescueBNB(toAddr, amount);
+      await tx.wait(1);
+      s.textContent = '✅ 已提取 BNB 到 ' + toAddr;
     } catch(e) {
       var s2 = document.getElementById('taxRescueStatus');
       s2.className = 'status err';
@@ -872,25 +935,104 @@
   async function taxRescueToken() {
     if (!taxContract || !contract) { alert('请先加载税费合约和代币合约！'); return; }
     try {
+      var toAddr = _taxRescueTo() || userAddr;
+      var amtStr = document.getElementById('taxRescueTokenAmt').value.trim();
       var tokenBal = await contract.balanceOf(taxContract.address);
       if (tokenBal.isZero()) { alert('税费合约内没有本币可提！'); return; }
-      var status = await taxContract.getStatus();
-      var minAmt = status.minProcessAmount_;
-      if (tokenBal.lte(minAmt)) { alert('余额未超过最低处理额度，不建议提取！'); return; }
-      var surplus = tokenBal.sub(minAmt);
-      var surplusStr = parseFloat(ethers.utils.formatEther(surplus)).toFixed(6);
-      if (!confirm('确认提取超出处理额度的 ' + surplusStr + ' 个代币到 owner？\n\n不会影响正常税费处理。')) return;
+
+      var amount, descStr;
+      if (!amtStr) {
+        var status = await taxContract.getStatus();
+        var minAmt = status.minProcessAmount_;
+        if (tokenBal.lte(minAmt)) { alert('余额未超过最低处理额度，不建议提取！'); return; }
+        amount = tokenBal.sub(minAmt);
+        descStr = '超出处理额度的 ' + parseFloat(ethers.utils.formatEther(amount)).toFixed(6);
+      } else {
+        amount = ethers.utils.parseEther(amtStr);
+        if (amount.gt(tokenBal)) { alert('余额不足！'); return; }
+        descStr = amtStr;
+      }
+      if (!confirm('确认提取 ' + descStr + ' 个代币到 ' + toAddr + ' ？')) return;
+
       document.getElementById('btnTaxRescueToken').disabled = true;
-      var tx = await taxContract.rescueToken(contract.address, surplus);
-      await tx.wait(1);
       var s = document.getElementById('taxRescueStatus');
-      s.className = 'status ok';
-      s.textContent = '✅ 已提取 ' + surplusStr + ' 代币';
+      s.className = 'status ok'; s.textContent = '⏳ 交易发送中...';
+      // 新签名: rescueToken(address _token, address _to, uint256 _amount)
+      var tx = await taxContract.rescueToken(contract.address, toAddr, amount);
+      await tx.wait(1);
+      s.textContent = '✅ 已提取代币到 ' + toAddr;
     } catch(e) {
       var s2 = document.getElementById('taxRescueStatus');
       s2.className = 'status err';
       s2.textContent = '❌ 失败：' + e.message;
     } finally { document.getElementById('btnTaxRescueToken').disabled = false; }
+  }
+
+  async function taxRescueAnyToken() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    try {
+      var toAddr = _taxRescueTo() || userAddr;
+      var tokenAddr = document.getElementById('taxRescueAnyAddr').value.trim();
+      if (!ethers.utils.isAddress(tokenAddr)) { alert('请输入有效的代币地址！'); return; }
+      var amtStr = document.getElementById('taxRescueAnyAmt').value.trim();
+
+      var erc20 = new ethers.Contract(tokenAddr, ['function balanceOf(address) view returns (uint256)','function decimals() view returns (uint8)','function symbol() view returns (string)'], signer);
+      var bal = await erc20.balanceOf(taxContract.address);
+      if (bal.isZero()) { alert('税费合约内该代币余额为 0！'); return; }
+
+      var amount;
+      if (!amtStr) {
+        amount = bal;
+        var dec = await erc20.decimals();
+        var sym = await erc20.symbol();
+        var fmt = parseFloat(ethers.utils.formatUnits(bal, dec)).toFixed(6);
+        if (!confirm('确认提取全部 ' + fmt + ' ' + sym + ' 到 ' + toAddr + ' ？')) return;
+      } else {
+        amount = ethers.utils.parseEther(amtStr);
+        if (amount.gt(bal)) { alert('余额不足！'); return; }
+        if (!confirm('确认提取 ' + amtStr + ' 枚代币到 ' + toAddr + ' ？')) return;
+      }
+
+      document.getElementById('btnTaxRescueAny').disabled = true;
+      var s = document.getElementById('taxRescueStatus');
+      s.className = 'status ok'; s.textContent = '⏳ 交易发送中...';
+      var tx = await taxContract.rescueToken(tokenAddr, toAddr, amount);
+      await tx.wait(1);
+      s.textContent = '✅ 已提取代币到 ' + toAddr;
+    } catch(e) {
+      var s2 = document.getElementById('taxRescueStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnTaxRescueAny').disabled = false; }
+  }
+
+  async function taxRescueLP() {
+    if (!taxContract) { alert('请先加载税费合约！'); return; }
+    try {
+      var toAddr = _taxRescueTo() || userAddr;
+      var pairAddr = document.getElementById('taxRescueLPAddr').value.trim();
+      if (!ethers.utils.isAddress(pairAddr)) { alert('请输入有效的 LP Token 地址！'); return; }
+
+      var lp = new ethers.Contract(pairAddr, ['function balanceOf(address) view returns (uint256)','function symbol() view returns (string)'], signer);
+      var bal = await lp.balanceOf(taxContract.address);
+      if (bal.isZero()) { alert('税费合约内 LP 余额为 0！'); return; }
+      var sym = await lp.symbol();
+      var fmt = parseFloat(ethers.utils.formatEther(bal)).toFixed(6);
+
+      if (!confirm('确认提取全部 ' + fmt + ' ' + sym + ' LP 到 ' + toAddr + ' ？\n\n仅转移 LP 代币，不会影响底池。')) return;
+
+      document.getElementById('btnTaxRescueLP').disabled = true;
+      var s = document.getElementById('taxRescueStatus');
+      s.className = 'status ok'; s.textContent = '⏳ 交易发送中...';
+      // 新签名: rescueLP(address _pair, address _to, uint256 _amount)
+      var tx = await taxContract.rescueLP(pairAddr, toAddr, bal);
+      await tx.wait(1);
+      s.textContent = '✅ 已提取 ' + fmt + ' ' + sym + ' LP 到 ' + toAddr;
+    } catch(e) {
+      var s2 = document.getElementById('taxRescueStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + e.message;
+    } finally { document.getElementById('btnTaxRescueLP').disabled = false; }
   }
 
   // ── 丢弃 owner 权限 ──
