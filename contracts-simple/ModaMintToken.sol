@@ -169,7 +169,17 @@ abstract contract DividendPayingToken is Ownable, DividendPayingTokenInterface, 
     uint256 public totalDividendsDistributed;
 
     receive() external payable {
-        distributeBNBDividends(msg.value);
+        // 直接更新分红，不经过 onlyOwner 保护的 distributeBNBDividends
+        // 因为 TaxDistributor 发送 BNB 时 msg.sender 不是 owner
+        uint256 supply = totalSupply();
+        if (supply > 0 && msg.value > 0) {
+            magnifiedDividendPerShare = SafeMath.add(
+                magnifiedDividendPerShare,
+                SafeMath.mul(msg.value, MAGNITUDE) / supply
+            );
+            emit DividendsDistributed(msg.sender, msg.value);
+            totalDividendsDistributed = SafeMath.add(totalDividendsDistributed, msg.value);
+        }
     }
 
     function distributeBNBDividends(uint256 amount) public virtual override onlyOwner {
@@ -385,6 +395,13 @@ contract ModaDividendTracker is DividendPayingToken {
             payable(owner()).transfer(bal);
         }
     }
+
+    /**
+     * @dev 提取误转入分红合约的任意 ERC20 代币
+     */
+    function emergencyWithdrawToken(address _token, uint256 _amount) external onlyOwner {
+        IERC20(_token).transfer(owner(), _amount);
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -570,10 +587,13 @@ contract ModaMintToken is IERC20, Ownable {
         require(amount > 0, "Amount zero");
         require(_balances[from] >= amount, "Insufficient balance");
 
-        bool isDexTransfer = (from == uniswapV2Pair || to == uniswapV2Pair);
-        if (isDexTransfer && !tradingActive) {
-            require(isExcludedFromTax[from] || isExcludedFromTax[to], "Trading not active");
-        }
+    bool isDexTransfer = (from == uniswapV2Pair || to == uniswapV2Pair);
+    // 允许 TaxDistributor 和 DividendTracker 在交易未激活时进行 swap
+    bool isTaxContract = (from == taxDistributor || to == taxDistributor ||
+                          from == address(dividendTracker) || to == address(dividendTracker));
+    if (isDexTransfer && !tradingActive && !isTaxContract) {
+        require(isExcludedFromTax[from] || isExcludedFromTax[to], "Trading not active");
+    }
 
         bool isBuy  = (from == uniswapV2Pair && to != address(uniswapV2Router));
         bool isSell = (to == uniswapV2Pair && from != address(uniswapV2Router));
@@ -617,15 +637,17 @@ contract ModaMintToken is IERC20, Ownable {
         }
 
         if (fwd > 0 && taxDistributor != address(0)) {
-            _balances[address(this)] = SafeMath.add(_balances[address(this)], fwd);
+            // 代币从合约转出，合约余额减少，税费合约余额增加
+            _balances[address(this)] = SafeMath.sub(_balances[address(this)], fwd);
             _balances[taxDistributor] = SafeMath.add(_balances[taxDistributor], fwd);
             emit Transfer(address(this), taxDistributor, fwd);
             // 自动触发税费处理，低级别调用忽略失败
             (bool ok, ) = taxDistributor.call(abi.encodeWithSignature("tryProcess()"));
             ok;
         } else if (fwd > 0) {
-            // taxDistributor 未设置，暂留合约（可用 emergencyWithdrawToken 提取）
-            _balances[address(this)] = SafeMath.add(_balances[address(this)], fwd);
+            // taxDistributor 未设置，税费暂留合约内
+            // _balances[address(this)] 已在 _transfer 中增加，此处无需重复
+            // 仅补发事件，代币实际已在合约余额中
             emit Transfer(from, address(this), fwd);
         }
     }
@@ -857,5 +879,9 @@ contract ModaMintToken is IERC20, Ownable {
 
     function dividendTrackerEmergencyWithdrawBNB() external onlyOwner {
         dividendTracker.emergencyWithdrawBNB();
+    }
+
+    function dividendTrackerEmergencyWithdrawToken(address _token, uint256 _amount) external onlyOwner {
+        dividendTracker.emergencyWithdrawToken(_token, _amount);
     }
 }

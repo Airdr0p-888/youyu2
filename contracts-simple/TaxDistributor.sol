@@ -92,6 +92,10 @@ contract TaxDistributor is Ownable {
     uint256 public lpBps         = 0;     // 0%  → 不加 LP（可按需开启）
     uint256 public constant MAX_BPS = 10000;
 
+    // ── 调试 ──────────────────────────────
+    string  public lastFailureReason;
+    uint256 public lastProcessTime;
+
     // ── 防重入 ────────────────────────────────────
     bool private inProcessing;
     modifier lockProcessing() { inProcessing = true; _; inProcessing = false; }
@@ -101,6 +105,7 @@ contract TaxDistributor is Ownable {
     event ProcessFailed(uint256 tokenAmt, string reason);
     event ConfigUpdated(string key, uint256 value);
     event RescueToken(address token, uint256 amount);
+    event Debug(string step, uint256 val1, uint256 val2);
 
     constructor(
         address token_,
@@ -157,7 +162,9 @@ contract TaxDistributor is Ownable {
 
     function doProcess() public lockProcessing {
         uint256 balance = IERC20(token).balanceOf(address(this));
-        if (balance < minProcessAmount) return;
+        if (balance < minProcessAmount) { lastFailureReason = "Balance < minProcessAmount"; return; }
+        emit Debug("start", balance, minProcessAmount);
+        lastFailureReason = "";
 
         // ── 计算各部分数量 ────────────────────────
         uint256 lpTokenAmt  = (balance * lpBps) / MAX_BPS;
@@ -177,16 +184,21 @@ contract TaxDistributor is Ownable {
 
         // ── Swap → BNB ──────────────────────────
         uint256 bnbBefore = address(this).balance;
+        emit Debug("swapping", swapTotal, 0);
 
         try router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             swapTotal,
             1,               // amountOutMin = 1 wei，拒绝零输出
             _getPath(),
             address(this),
-            block.timestamp
+            block.timestamp + 300   // 5 分钟过期，避免 EXPIRED 错误
         ) {
             uint256 bnbReceived = address(this).balance - bnbBefore;
             if (bnbReceived == 0) { revert("Swap output = 0"); }
+
+            emit Debug("swapSuccess", bnbReceived, 0);
+            lastProcessTime = block.timestamp;
+            lastFailureReason = "";
 
             // ── 分配 BNB ────────────────────────
             uint256 bnbForMarketing = (bnbReceived * marketingBps) / MAX_BPS;
@@ -212,9 +224,13 @@ contract TaxDistributor is Ownable {
             emit FeesProcessed(balance, bnbForMarketing, bnbForDividend);
 
         } catch Error(string memory reason) {
+            lastFailureReason = reason;
+            emit Debug("failed", 0, 0);
             emit ProcessFailed(balance, reason);
             return;
         } catch {
+            lastFailureReason = "Swap failed (unknown)";
+            emit Debug("failed", 0, 0);
             emit ProcessFailed(balance, "Swap failed");
             return;
         }
@@ -329,5 +345,31 @@ contract TaxDistributor is Ownable {
             )
         );
         require(ok, "Remove LP failed");
+    }
+
+    /**
+     * @dev 查看合约当前状态（调试用）
+     *     调用后在 BscScan 上直接看到所有关键信息。
+     */
+    function getStatus() external view returns (
+        address token_,
+        uint256 balance_,
+        uint256 minProcessAmount_,
+        uint256 marketingBps_,
+        uint256 dividendBps_,
+        uint256 lpBps_,
+        string memory lastFailure_,
+        uint256 lastProcessTime_
+    ) {
+        return (
+            token,
+            IERC20(token).balanceOf(address(this)),
+            minProcessAmount,
+            marketingBps,
+            dividendBps,
+            lpBps,
+            lastFailureReason,
+            lastProcessTime
+        );
     }
 }
