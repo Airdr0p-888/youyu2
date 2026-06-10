@@ -689,7 +689,7 @@ async function deployToken() {
     //  TaxDistributor 收到代币后 swap → BNB → 按四项分配
     // ═══════════════════════════════════════════
     setModalStatus('🔗 正在设置税费分配钱包...', '请在钱包中确认第三笔交易', '🔗');
-    var setTx = await tokenContract.setTaxDistributorWallet(taxDistAddr);
+    var setTx = await tokenContract.setTaxDistributor(taxDistAddr);
     setModalStatus('⏳ 等待确认...', '区块确认中', '⏳');
     await setTx.wait(1);
 

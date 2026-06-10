@@ -202,6 +202,17 @@
   </div>
 
   <div class="card">
+    <div class="card-title">🔗 关联税费分配合约</div>
+    <div class="hint">部署 TaxDistributor 后，需要调用此函数将主合约与分配合约关联。会自动设置税费豁免。</div>
+    <div class="field" style="margin-top:8px;">
+      <label>TaxDistributor 合约地址</label>
+      <input type="text" id="linkTaxAddr" placeholder="0x..." />
+    </div>
+    <button id="btnLinkTax" class="btn btn-gold" onclick="linkTaxDistributor()" disabled>关联合约</button>
+    <div id="linkTaxStatus" class="status"></div>
+  </div>
+
+  <div class="card">
     <div class="card-title">💰 税费分配合约管理</div>
     <div class="field">
       <label>税费分配合约地址（TaxDistributor）</label>
@@ -339,6 +350,7 @@
       s.className = 'status ok';
       s.textContent = '✅ 合约加载成功！Owner：' + await contract.owner();
       document.getElementById('btnTriggerDiv').disabled = false;
+      document.getElementById('btnLinkTax').disabled = false;
       refreshBalance();
       checkTradingStatus();
     } catch(e) {
@@ -729,6 +741,36 @@
       s2.className = 'status err';
       s2.textContent = '❌ 失败：' + e.message;
     } finally { document.getElementById('btnWithdrawDivBNB').disabled = false; }
+  }
+
+  /* ── 关联主合约与税费分配合约 ── */
+  async function linkTaxDistributor() {
+    if (!contract) { alert('请先加载主合约！'); return; }
+    var taxAddr = document.getElementById('linkTaxAddr').value.trim();
+    if (!taxAddr || !taxAddr.startsWith('0x') || taxAddr.length !== 42) {
+      alert('请输入有效的 TaxDistributor 地址（42位 0x 开头）');
+      return;
+    }
+    try {
+      var btn = document.getElementById('btnLinkTax');
+      btn.disabled = true;
+      btn.textContent = '⏳ 交易进行中...';
+      var tx = await contract.setTaxDistributor(taxAddr);
+      var s = document.getElementById('linkTaxStatus');
+      s.className = 'status';
+      s.textContent = '⏳ 等待确认...';
+      await tx.wait(1);
+      s.className = 'status ok';
+      s.textContent = '✅ 已关联！TaxDistributor: ' + taxAddr;
+      document.getElementById('linkTaxAddr').value = '';
+    } catch(e) {
+      var s2 = document.getElementById('linkTaxStatus');
+      s2.className = 'status err';
+      s2.textContent = '❌ 失败：' + (e.message || e);
+    } finally {
+      document.getElementById('btnLinkTax').disabled = false;
+      document.getElementById('btnLinkTax').textContent = '关联合约';
+    }
   }
 
   /* ── 税费分配合约管理 ── */
