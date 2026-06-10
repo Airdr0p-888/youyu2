@@ -676,9 +676,8 @@ async function deployToken() {
       dividendTrackerAddr,    // dividendTracker
       ROUTER_ADDR,            // router
       ethers.BigNumber.from(mktBps.toString()),   // marketingBps
-      ethers.BigNumber.from(burnBps.toString()),  // burnBps（★ 新增）
-      ethers.BigNumber.from(lpBps.toString()),    // lpBps
-      ethers.BigNumber.from(distBps.toString())   // dividendBps
+      ethers.BigNumber.from(distBps.toString()),  // dividendBps
+      ethers.BigNumber.from(lpBps.toString())     // lpBps
     );
     setModalStatus('⏳ 等待分配合约确认...', '区块确认中', '⏳');
     await distContract.deployTransaction.wait(1);
