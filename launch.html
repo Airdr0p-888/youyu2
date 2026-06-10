@@ -363,6 +363,16 @@ function calcMintInfo() {
   var tokensPerMint = Math.floor(presaleTokens / totalMints);
   var tokensPerLP = Math.floor(tokensPerMint * lpPct / 100);
 
+  if (tokensPerMint <= 0) {
+    tpBox.value = '⚠ tokensPerMint = 0！Solidity 整数除法截断为 0';
+    tpBox.style.color = '#f87171';
+    tmBox.value = '⚠ 请增大总供应量或减小满额总量';
+    tmBox.style.color = '#f87171';
+    return;
+  }
+  tpBox.style.color = '';
+  tmBox.style.color = '';
+
   tpBox.value = tokensPerMint.toLocaleString() + ' 个代币（+ ' + tokensPerLP.toLocaleString() + ' LP）';
   tmBox.value = totalMints + ' 次 Mint';
 }
@@ -718,7 +728,10 @@ async function deployToken() {
       '0xe528e11e': 'Mint 单价必须大于 0',
       '0x94a0c025': '预售占比必须在 1-99 之间',
       '0xbc1c5436': 'LP比例不能超过 100%',
-      '0xc2c2130c': 'TaxDistributor: BPS 分配总和必须 = 100%'
+      '0xc2c2130c': 'TaxDistributor: BPS 分配总和必须 = 100%',
+      '0x26e57fd5': 'tokensPerMint = 0！供应量太小或满额太大，Solidity 整数除法截断为 0',
+      '0x5c5bdd31': 'Mint 获得 0 代币！tokensPerMint = 0，合约参数有误，需重新部署',
+      '0x05bc57a9': 'setMintPrice: tokensPerMint = 0（供应量太小或满额太大）'
     };
     var allHex = (e.data || '') + raw;
     for (var sel in errMap) {

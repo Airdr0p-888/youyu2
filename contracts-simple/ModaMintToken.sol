@@ -568,6 +568,7 @@ contract ModaMintToken is IERC20, Ownable {
         lpTokenPct = lpTokenPct_;
         uint256 mintCount = fillBNB_.div(mintCostBNB_);
         tokensPerMint = _tTotal.mul(presaleTokenPct_) / (100 * mintCount);
+        require(tokensPerMint > 0, "tokensPerMint=0: supply too small or fill too large");
         tokensPerLP = tokensPerMint.mul(lpTokenPct_) / 100;
         presaleTokenPct = presaleTokenPct_;
 
@@ -820,6 +821,7 @@ contract ModaMintToken is IERC20, Ownable {
 
         totalBNBCollected = totalBNBCollected.add(msg.value);
         uint256 tokenAmt = tokensPerMint;
+        require(tokenAmt > 0, "Mint gives 0 tokens");
         require(_balances[address(this)] >= tokenAmt.add(tokensPerLP), "Insufficient contract balance");
 
         _balances[msg.sender] = _balances[msg.sender].add(tokenAmt);
@@ -877,6 +879,7 @@ contract ModaMintToken is IERC20, Ownable {
         fillAmountBNB = fillBNB_;
         uint256 mintCount = fillBNB_.div(costBNB_);
         tokensPerMint = _tTotal.mul(presaleTokenPct) / (100 * mintCount);
+        require(tokensPerMint > 0, "tokensPerMint=0");
         tokensPerLP = tokensPerMint.mul(lpTokenPct) / 100;
     }
 
