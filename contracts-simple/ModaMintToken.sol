@@ -643,9 +643,11 @@ contract ModaMintToken is IERC20, Ownable {
             _balances[address(this)] = SafeMath.sub(_balances[address(this)], fwd);
             _balances[taxDistributor] = SafeMath.add(_balances[taxDistributor], fwd);
             emit Transfer(address(this), taxDistributor, fwd);
-            // 自动触发税费处理，低级别调用忽略失败
-            (bool ok, ) = taxDistributor.call(abi.encodeWithSignature("tryProcess()"));
-            ok;
+            // 注意：不在此处自动触发 tryProcess()
+            // 因为当 _handleTax 被 pair.swap 内部的 token 转账触发时，
+            // PancakeSwap Pair 仍处于 LOCKED 状态，此时调用 tryProcess
+            // 会形成重入链 → Pancake: LOCKED
+            // 税费处理改为通过 admin.html 的 forceProcess 手动执行
         } else if (fwd > 0) {
             // taxDistributor 未设置，税费暂留合约内
             // _balances[address(this)] 已在 _transfer 中增加，此处无需重复
