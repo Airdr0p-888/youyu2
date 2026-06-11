@@ -181,6 +181,27 @@
       .squid-visual{height:260px}
       .cfooter{flex-direction:column}
     }
+
+    /* Submit Modal */
+    .modal-overlay{display:none;position:fixed;inset:0;z-index:999;background:rgba(0,0,0,0.65);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:16px}
+    .modal-overlay.open{display:flex}
+    .modal-box{background:linear-gradient(160deg,#0a1628,#06101e);border:1px solid var(--cyan);border-radius:18px;width:100%;max-width:480px;padding:36px 32px 28px;position:relative;box-shadow:0 0 60px rgba(0,212,255,0.15)}
+    .modal-box h2{font-size:1.25rem;font-weight:800;margin-bottom:4px}
+    .modal-box .modal-desc{font-size:0.82rem;color:var(--text-secondary);margin-bottom:22px}
+    .modal-close{position:absolute;top:14px;right:16px;background:none;border:none;color:var(--text-secondary);font-size:1.4rem;cursor:pointer;transition:color 0.2s}
+    .modal-close:hover{color:var(--cyan)}
+    .form-group{margin-bottom:16px}
+    .form-group label{display:block;font-size:0.78rem;color:var(--text-secondary);margin-bottom:6px;font-weight:600}
+    .form-group input,.form-group textarea{width:100%;padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:rgba(0,212,255,0.04);color:var(--text-primary);font-size:0.92rem;font-family:inherit;outline:none;transition:border-color 0.2s}
+    .form-group input:focus,.form-group textarea:focus{border-color:var(--cyan)}
+    .form-group textarea{resize:vertical;min-height:70px}
+    .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .modal-btn{width:100%;padding:13px;border-radius:11px;border:none;background:linear-gradient(135deg,var(--cyan),#0099cc);color:#000;font-weight:800;font-size:0.95rem;cursor:pointer;transition:all 0.25s;margin-top:6px;font-family:inherit}
+    .modal-btn:hover{box-shadow:0 0 28px var(--cyan-glow);transform:translateY(-1px)}
+    .modal-btn:disabled{opacity:0.5;cursor:not-allowed;transform:none;box-shadow:none}
+    .modal-msg{font-size:0.8rem;margin-top:10px;text-align:center;display:none}
+    .modal-msg.ok{color:var(--green);display:block}
+    .modal-msg.err{color:var(--magenta);display:block}
   </style>
 </head>
 <body>
@@ -277,7 +298,7 @@
       <div class="cta-box">
         <h2>准备好 <span class="gtxt">深海发射</span> 你的项目了吗？</h2>
         <p>加入 SquidLaunch，让千万用户看到你的代币。</p>
-        <a href="launch.html" class="btn btn-primary" style="font-size:1rem;padding:14px 36px">🚀 立即提交发射申请</a>
+        <a href="#" onclick="openSubmitModal();return false" class="btn btn-primary" style="font-size:1rem;padding:14px 36px">🚀 立即提交发射申请</a>
       </div>
       <div class="cfooter">
         <div class="cfooter-left">
@@ -361,7 +382,7 @@
       <div class="cta-box" style="padding-top:24px">
         <h2>成为 <span class="gtxt">第一个</span> 发射项目</h2>
         <p>抢先入驻 SquidLaunch，享受首发流量红利与专属孵化支持</p>
-        <a href="launch.html" class="btn btn-primary" style="font-size:1rem;padding:14px 36px">🚀 立即提交项目申请</a>
+        <a href="#" onclick="openSubmitModal();return false" class="btn btn-primary" style="font-size:1rem;padding:14px 36px">🚀 立即提交项目申请</a>
       </div>
 
       <div class="cfooter">
@@ -405,9 +426,98 @@
     </div>
 
   </div>
+</div><!-- /app-shell -->
+
+<!-- Submit Modal -->
+<div class="modal-overlay" id="submit-modal">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeSubmitModal()">✕</button>
+    <h2>🚀 提交项目申请</h2>
+    <p class="modal-desc">填写以下信息，我们将在 24 小时内与您联系。</p>
+    <form id="submit-form" onsubmit="submitToDingTalk(event)">
+      <div class="form-group">
+        <label>社交渠道</label>
+        <input type="text" name="social" placeholder="例：Twitter / Telegram / QQ群" required />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>群人数</label>
+          <input type="number" name="groupSize" placeholder="例：500" required />
+        </div>
+        <div class="form-group">
+          <label>Mint 份数</label>
+          <input type="number" name="mintCount" placeholder="例：1000" required />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Mint 金额</label>
+        <input type="text" name="mintAmount" placeholder="例：0.1 BNB / 100 USDT" required />
+      </div>
+      <div class="form-group">
+        <label>联系人</label>
+        <input type="text" name="contact" placeholder="微信号 / Telegram / 邮箱" required />
+      </div>
+      <button type="submit" class="modal-btn" id="submit-btn">🚀 提交申请</button>
+      <div class="modal-msg" id="modal-msg"></div>
+    </form>
+  </div>
 </div>
 
 <script>
+/* ---- Submit Modal ---- */
+function openSubmitModal(){ document.getElementById('submit-modal').classList.add('open') }
+function closeSubmitModal(){
+  document.getElementById('submit-modal').classList.remove('open');
+  document.getElementById('submit-form').reset();
+  document.getElementById('modal-msg').className='modal-msg';
+  document.getElementById('modal-msg').style.display='none';
+}
+// Close on overlay click
+document.getElementById('submit-modal').addEventListener('click', function(e){ if(e.target===this) closeSubmitModal() });
+
+async function submitToDingTalk(e){
+  e.preventDefault();
+  const form = e.target;
+  const btn = document.getElementById('submit-btn');
+  const msgEl = document.getElementById('modal-msg');
+  const data = Object.fromEntries(new FormData(form).entries());
+
+  const text =
+`### SquidLaunch 项目申请
+- 社交渠道：${data.social}
+- 群人数：${data.groupSize}
+- Mint 份数：${data.mintCount}
+- Mint 金额：${data.mintAmount}
+- 联系人：${data.contact}`;
+
+  btn.disabled = true;
+  btn.textContent = '提交中…';
+
+  try {
+    const res = await fetch('https://oapi.dingtalk.com/robot/send?access_token=0aae4ea4b8f0426f91fe97181b97353763e8902795b4a4991d58b39996c5cbd7', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msgtype:'markdown', markdown:{ title:'SquidLaunch 项目申请', text } })
+    });
+    const result = await res.json();
+    if(result.errcode === 0){
+      msgEl.textContent = '✅ 提交成功！我们将在 24 小时内联系您。';
+      msgEl.className = 'modal-msg ok';
+      msgEl.style.display = 'block';
+      setTimeout(closeSubmitModal, 2500);
+    } else {
+      throw new Error(result.errmsg || '未知错误');
+    }
+  } catch(err) {
+    msgEl.textContent = '❌ 提交失败：' + err.message + '，请稍后重试。';
+    msgEl.className = 'modal-msg err';
+    msgEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🚀 提交申请';
+  }
+}
+
 // Tab switching
 const tabBtns = document.querySelectorAll('.tab-nav button');
 const panels  = document.querySelectorAll('.content-panel');
